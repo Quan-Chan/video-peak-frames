@@ -115,6 +115,7 @@ Licenses of dependencies:
 | Component | License |
 | --- | --- |
 | sharp | Apache-2.0 |
+| prebuilt libvips binaries of sharp (`@img/sharp-libvips-*`) | LGPL-3.0-or-later |
 | opentype.js | MIT |
 | @expo-google-fonts/roboto-mono | MIT and SIL Open Font License 1.1 |
 | Roboto Mono font | SIL Open Font License 1.1 |
@@ -126,3 +127,5 @@ The ffmpeg and ffprobe executables are not distributed with this project. At run
 3. `vendor/ffmpeg/`, fetched by `scripts/install-ffmpeg.mjs`, an LGPL build without `--enable-gpl`
 
 `vendor/` is kept out of the repository and out of any release artifact. ffmpeg is invoked as a separate process; this project does not link against it.
+
+The prebuilt libvips binaries of sharp are LGPL-3.0-or-later. When distributing an artifact that contains them, include the LGPL-3.0 license text and keep libvips replaceable.

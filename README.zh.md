@@ -115,6 +115,7 @@ npm test
 | 组件 | 许可证 |
 | --- | --- |
 | sharp | Apache-2.0 |
+| sharp 的 libvips 预编译二进制（`@img/sharp-libvips-*`） | LGPL-3.0-or-later |
 | opentype.js | MIT |
 | @expo-google-fonts/roboto-mono | MIT 与 SIL Open Font License 1.1 |
 | Roboto Mono 字体 | SIL Open Font License 1.1 |
@@ -126,3 +127,5 @@ ffmpeg 与 ffprobe 的可执行文件不随本项目分发。运行时按以下�
 3. `vendor/ffmpeg/`，由 `scripts/install-ffmpeg.mjs` 获取，为不含 `--enable-gpl` 的 LGPL 构建
 
 `vendor/` 不进入版本库与发布物。ffmpeg 以独立进程方式调用，本项目代码不与其链接。
+
+sharp 的 libvips 预编译二进制为 LGPL-3.0-or-later。分发含该二进制的产物时，附 LGPL-3.0 许可证全文，并保留替换 libvips 的途径。
