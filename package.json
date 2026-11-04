@@ -1,0 +1,21 @@
+{
+  "name": "video-peak-frames",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "按 50ms 时间槽抽取变化最大的帧，每 4 帧拼成一张图片",
+  "bin": {
+    "vpf": "bin/cli.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@ffprobe-installer/ffprobe": "^2.1.2",
+    "sharp": "^0.35.5"
+  }
+}

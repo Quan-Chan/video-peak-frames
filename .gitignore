@@ -1,0 +1,10 @@
+node_modules/
+输出/
+demo/
+frames/
+*.log
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.avi
