@@ -1,4 +1,5 @@
 node_modules/
+vendor/
 输出/
 demo/
 frames/

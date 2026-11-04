@@ -2,6 +2,7 @@
 import { parseArgs } from 'node:util';
 import path from 'node:path';
 import { run } from '../src/pipeline.js';
+import { ensureBinaries } from '../src/probe.js';
 import { parseLayout, STAMP_POS, STAMP_DIR } from '../src/compose.js';
 
 const HELP = `视频抽帧工具 vpf
@@ -131,6 +132,7 @@ async function main() {
     console.log(HELP);
     return;
   }
+  await ensureBinaries();
 
   const input = values.input ?? positionals[0];
   if (!input) fail('缺少输入视频，用 vpf <input.mp4> 或 -i <input.mp4> 指定\n\n' + HELP);

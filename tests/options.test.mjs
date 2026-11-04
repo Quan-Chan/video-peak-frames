@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { mkdtemp, rm, readdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { ffmpegPath } from '../src/probe.js';
+import { ffmpegPath, ensureBinaries } from '../src/probe.js';
 import { run, buildFileName } from '../src/pipeline.js';
 import { parseLayout, stampSvg, STAMP_POS, STAMP_DIR } from '../src/compose.js';
 
@@ -14,6 +14,7 @@ let tmp;
 let video;
 
 before(async () => {
+  await ensureBinaries();
   tmp = await mkdtemp(path.join(os.tmpdir(), 'vpf-opts-'));
   video = path.join(tmp, 'clip.mp4');
   await exec(ffmpegPath, [

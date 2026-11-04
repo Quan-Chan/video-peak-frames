@@ -6,7 +6,7 @@ import { mkdtemp, rm, readdir, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
-import { ffmpegPath } from '../src/probe.js';
+import { ffmpegPath, ensureBinaries } from '../src/probe.js';
 import { run } from '../src/pipeline.js';
 
 const exec = promisify(execFile);
@@ -40,6 +40,7 @@ const BASE = {
 };
 
 before(async () => {
+  await ensureBinaries();
   tmp = await mkdtemp(path.join(os.tmpdir(), 'vpf-test-'));
   src10 = await makeVideo('ten-fps.mp4', [
     '-f', 'lavfi', '-i', 'color=c=0x000080:s=320x180:r=10:d=1',

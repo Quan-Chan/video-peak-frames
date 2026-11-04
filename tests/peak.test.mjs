@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { ffmpegPath } from '../src/probe.js';
+import { ffmpegPath, ensureBinaries } from '../src/probe.js';
 import { decodeFrames } from '../src/decode.js';
 import { toGray, changeScore } from '../src/score.js';
 import { run } from '../src/pipeline.js';
@@ -17,6 +17,7 @@ const exec = promisify(execFile);
  * （最大块平均差），再核对 manifest 中每个槽选中的 frameIndex 确实是槽内最大值。
  */
 test('每个槽选中的确实是槽内变化量最大的那一帧', async () => {
+  await ensureBinaries();
   const tmp = await mkdtemp(path.join(os.tmpdir(), 'vpf-peak-'));
   try {
     const video = path.join(tmp, 'source.mp4');

@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { ffmpegPath } from '../src/probe.js';
+import { ffmpegPath, ensureBinaries } from '../src/probe.js';
 import { mad, changeScore, SAMPLE_W, SAMPLE_H } from '../src/score.js';
 import { run } from '../src/pipeline.js';
 
@@ -14,6 +14,7 @@ let tmp;
 let video;
 
 before(async () => {
+  await ensureBinaries();
   tmp = await mkdtemp(path.join(os.tmpdir(), 'vpf-local-'));
   video = path.join(tmp, 'local.mp4');
   // 静止灰底；0.100s 一小块方块变白（模拟点击按钮 / UI 更新）；
@@ -23,7 +24,7 @@ before(async () => {
     '-f', 'lavfi', '-i', 'color=c=0x646464:s=320x180:r=60:d=1',
     '-vf',
     "drawbox=x=64:y=64:w=24:h=24:color=white:t=fill:enable='between(t,0.100,0.116)'," +
-    "eq=brightness=0.05:enable='between(t,0.1167,0.133)'",
+    "drawbox=x=0:y=0:w=iw:h=ih:color=white@0.06:t=fill:enable='between(t,0.1167,0.133)'",
     '-c:v', 'mpeg4', '-q:v', '2', '-pix_fmt', 'yuv420p',
     video,
   ], { windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
