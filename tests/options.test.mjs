@@ -123,7 +123,7 @@ test('九种位置与四种方向都能生成合成层', () => {
   for (const pos of STAMP_POS) {
     for (const dir of STAMP_DIR) {
       const svg = stampSvg(480, 270, '00:12.345', { pos, dir }).toString('utf8');
-      assert.ok(svg.includes('<text'), `${pos}/${dir} 未生成文字`);
+      assert.ok(svg.includes('<path'), `${pos}/${dir} 未生成字形轮廓`);
     }
   }
   assert.throws(() => stampSvg(100, 100, 'x', { pos: 'xx' }), /位置/);

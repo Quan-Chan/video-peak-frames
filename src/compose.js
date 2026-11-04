@@ -1,5 +1,6 @@
 import sharp from 'sharp';
 import { formatTimecode } from './score.js';
+import { textToPathData, measureText } from './text-path.js';
 
 const EMPTY_BG = '#14161C';
 const UNUSED_BG = '#2A2E38';
@@ -25,15 +26,12 @@ export function parseLayout(text) {
   return { cols, rows, cells };
 }
 
-function escapeXml(text) {
-  return String(text).replace(/[&<>"]/g, (c) => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]
-  ));
-}
-
 /**
- * 时间码合成层。竖排不依赖 librsvg 的 writing-mode，逐字符定位，
- * 四种方向共用一套坐标；块放不下时按比例缩小字号。
+ * 时间码合成层。
+ *
+ * 文字用 Roboto Mono（SIL OFL 1.1，可商用可分发）的字形轮廓渲染成 SVG path，
+ * 竖排不依赖 librsvg 的 writing-mode，逐字符定位，四种方向共用一套坐标；
+ * 块放不下时按比例缩小字号。
  */
 export function stampSvg(width, height, text, { pos = 'tl', dir = 'h-lr', color = '#FFFFFF' } = {}) {
   if (!STAMP_POS.includes(pos)) {
@@ -47,7 +45,7 @@ export function stampSvg(width, height, text, { pos = 'tl', dir = 'h-lr', color 
   const vertical = dir === 'v-tb' || dir === 'v-bt';
 
   const measure = (size) => {
-    const cw = size * 0.62;
+    const cw = measureText('0', size); // 等宽字体，任取一字宽即可
     const lh = size * 1.28;
     const textW = vertical ? cw : chars.length * cw;
     const textH = vertical ? chars.length * lh : lh;
@@ -86,18 +84,20 @@ export function stampSvg(width, height, text, { pos = 'tl', dir = 'h-lr', color 
     `<rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${blockW.toFixed(1)}" height="${blockH.toFixed(1)}" rx="4" fill="#000000" fill-opacity="0.66"/>`;
 
   for (let i = 0; i < chars.length; i++) {
+    const k = vertical
+      ? (dir === 'v-bt' ? chars.length - 1 - i : i)
+      : (dir === 'h-rl' ? chars.length - 1 - i : i);
     let cx;
     let cy;
     if (vertical) {
-      const k = dir === 'v-bt' ? chars.length - 1 - i : i;
       cx = tx + textW / 2;
-      cy = ty + (k + 0.74) * lh;
+      cy = ty + (k + 0.76) * lh;
     } else {
-      const k = dir === 'h-rl' ? chars.length - 1 - i : i;
       cx = tx + k * cw + cw / 2;
-      cy = ty + textH * 0.74;
+      cy = ty + textH * 0.76;
     }
-    svg += `<text x="${cx.toFixed(1)}" y="${cy.toFixed(1)}" font-size="${size}" text-anchor="middle" fill="${color}">${escapeXml(chars[i])}</text>`;
+    const charW = measureText(chars[i], size);
+    svg += `<path d="${textToPathData(chars[i], cx - charW / 2, cy, size)}" fill="${color}"/>`;
   }
   return Buffer.from(svg + '</svg>');
 }
