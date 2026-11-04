@@ -30,6 +30,7 @@ export function parseLayout(text) {
  * 时间码合成层。
  *
  * 文字用 Roboto Mono（SIL OFL 1.1，可商用可分发）的字形轮廓渲染成 SVG path，
+ * 不使用 SVG <text>，因此不依赖任何系统自带字体。
  * 竖排不依赖 librsvg 的 writing-mode，逐字符定位，四种方向共用一套坐标；
  * 块放不下时按比例缩小字号。
  */

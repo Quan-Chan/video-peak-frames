@@ -9,6 +9,7 @@ import opentype from 'opentype.js';
  * 字体：Roboto Mono，SIL Open Font License 1.1（可商用、可再分发），
  * 经 @expo-google-fonts/roboto-mono（MIT 包装）引入。
  * 用 opentype.js 把字形转成 SVG path 后再交给 sharp 渲染，
+ * 因此**不依赖任何系统自带字体**。
  */
 const require_ = createRequire(import.meta.url);
 
