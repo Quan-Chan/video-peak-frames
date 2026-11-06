@@ -49,6 +49,17 @@ const HELP = `视频抽帧工具 vpf
       --quiet               不打印进度
   -h, --help                显示帮助
 
+四、自适应采样（可选）
+      --adaptive            按画面变化量分配帧率：变化多的片段多抽，变化少的少抽。
+                            开启后以 --max-fps 为基准网格，按 --adapt-window 秒的窗口统计活动度
+      --min-fps n           每秒抽帧下限，默认 2
+      --max-fps n           每秒抽帧上限，默认等于 --slots-per-second；同时决定基准网格密度
+      --adapt-window <sec>  活动度统计窗口，默认 1
+      --adapt-low <n>       活动度低于该值时用下限帧率，默认 1
+      --adapt-high <n>      活动度高于该值时用上限帧率，默认 40
+                            自适应模式下每格是一段连续区段（起止时间可变），
+                            最后一张图可能不满；文件名格式不变
+
 输出文件名统一为：
   <视频名>__t<起s>-<止s>__q<质量>__<排版>__<序号>.<扩展名>
   例：CS2__t0.00s-0.20s__q90__2x2__00001.jpg
@@ -116,6 +127,12 @@ async function main() {
       quality: { type: 'string', default: '90' },
       gap: { type: 'string', default: '4' },
       'slots-per-second': { type: 'string', default: '20' },
+      adaptive: { type: 'boolean', default: false },
+      'min-fps': { type: 'string' },
+      'max-fps': { type: 'string' },
+      'adapt-window': { type: 'string', default: '1' },
+      'adapt-low': { type: 'string', default: '1' },
+      'adapt-high': { type: 'string', default: '40' },
       'stamp-pos': { type: 'string', default: 'tl' },
       'stamp-dir': { type: 'string', default: 'h-lr' },
       'noise-floor': { type: 'string', default: '0' },
@@ -154,6 +171,26 @@ async function main() {
     fail(capacityError(layout, framesPerSheet, `--frames-per-sheet ${framesPerSheet} 张图片`));
   }
 
+  const slotsPerSecond = intOf(values['slots-per-second'], '--slots-per-second', 1, 240);
+  const adaptive = Boolean(values.adaptive);
+  let minFps = 2;
+  let maxFps = slotsPerSecond;
+  let adaptWindow = 1;
+  let adaptLow = 1;
+  let adaptHigh = 40;
+  if (adaptive) {
+    minFps = intOf(values['min-fps'] ?? '2', '--min-fps', 1, 240);
+    maxFps = values['max-fps'] == null
+      ? slotsPerSecond
+      : intOf(values['max-fps'], '--max-fps', 1, 240);
+    if (minFps > maxFps) fail('--min-fps 不能大于 --max-fps');
+    adaptWindow = floatOf(values['adapt-window'], '--adapt-window');
+    if (adaptWindow <= 0 || adaptWindow > 10) fail('--adapt-window 应为 0-10 之间的正数');
+    adaptLow = floatOf(values['adapt-low'], '--adapt-low');
+    adaptHigh = floatOf(values['adapt-high'], '--adapt-high');
+    if (adaptHigh <= adaptLow) fail('--adapt-low 必须小于 --adapt-high');
+  }
+
   const options = {
     input: path.resolve(input),
     outDir: path.resolve(values.out),
@@ -163,7 +200,8 @@ async function main() {
     framesPerSheet,
     quality: intOf(values.quality, '--quality', 1, 100),
     gap: intOf(values.gap, '--gap', 0, 64),
-    slotsPerSecond: intOf(values['slots-per-second'], '--slots-per-second', 1, 240),
+    slotsPerSecond,
+    adaptive, minFps, maxFps, adaptWindow, adaptLow, adaptHigh,
     stampPos: mapEnum(values['stamp-pos'], POS_ALIAS, '--stamp-pos'),
     stampDir: mapEnum(values['stamp-dir'], DIR_ALIAS, '--stamp-dir'),
     noiseFloor: floatOf(values['noise-floor'], '--noise-floor'),
@@ -179,11 +217,19 @@ async function main() {
   const manifest = await run(options);
   if (!options.quiet) {
     const s = manifest.summary;
-    console.log(
-      `完成：${s.sheets} 张图 / ${s.slots} 个槽，` +
-      `有效帧 ${s.filledSlots}，空帧 ${s.emptySlots}，` +
-      `输出目录 ${options.outDir}`
-    );
+    if (options.adaptive) {
+      console.log(
+        `完成：${s.sheets} 张图 / ${s.slots} 个区段，平均 ${s.avgFps} fps，` +
+        `有效帧 ${s.filledSlots}，空帧 ${s.emptySlots}，` +
+        `输出目录 ${options.outDir}`
+      );
+    } else {
+      console.log(
+        `完成：${s.sheets} 张图 / ${s.slots} 个槽，` +
+        `有效帧 ${s.filledSlots}，空帧 ${s.emptySlots}，` +
+        `输出目录 ${options.outDir}`
+      );
+    }
     if (options.dryRun) console.log('（--dry-run：仅生成 manifest.json，未写图片）');
   }
 }

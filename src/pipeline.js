@@ -1,55 +1,29 @@
-import { mkdir, rename, rm } from 'node:fs/promises';
-import { createReadStream, createWriteStream, readFileSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { probe } from './probe.js';
 import { decodeFrames } from './decode.js';
 import { getGraySampler, changeScore, createScoreScratch, BLOCK_PX, SAMPLE_W, SAMPLE_H } from './score.js';
 import { slotLayout, slotIndexOf } from './slots.js';
-import { composeSheet, parseLayout, capacityError } from './compose.js';
+import { composeSheet } from './compose.js';
+import { sanitizeVideoName, buildFileName } from './naming.js';
+import { resolveCommonOptions } from './prepare.js';
+import { ManifestSpool, readSheets } from './manifest.js';
+import { runAdaptive } from './adaptive.js';
+
+export { buildFileName } from './naming.js';
 
 // 版本号只有 package.json 一个来源，manifest 与发布物不会对不上。
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
-const EXT = { jpg: 'jpg', jpeg: 'jpg', png: 'png', webp: 'webp' };
-
-function sanitizeVideoName(input) {
-  const base = path.basename(input, path.extname(input));
-  const safe = base
-    .replace(/[\\/:*?"<>|]/g, '_')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return safe || 'video';
-}
-
-function fmtSec(value) {
-  return Number(value).toFixed(2);
-}
-
-/** 文件名统一携带元信息：视频名 / 时间区间 / 质量 / 排版 / 序号。 */
-export function buildFileName({ videoName, startSec, endSec, quality, layout, index, ext }) {
-  return `${videoName}__t${fmtSec(startSec)}s-${fmtSec(endSec)}s__q${quality}__${layout}__${String(index).padStart(5, '0')}.${ext}`;
-}
-
-/** 写入一块数据，等待落盘（或失败），同时处理背压。 */
-function writeChunk(stream, chunk) {
-  return new Promise((resolve, reject) => {
-    stream.write(chunk, (error) => (error ? reject(error) : resolve()));
-  });
-}
-
-/** 按 JSON.stringify(..., null, 2) 的数组项缩进，供流式写出 sheets。 */
-function indentEntry(text) {
-  return text.split('\n').map((line) => `    ${line}`).join('\n');
-}
-
 /**
- * 单张图的写队列。
+ * 单张图的写队列（固定网格模式）。
  *
  * 一张图的帧全部确定后立即合成，不再等全片解码完；帧缓冲在合成完成后释放。
  * 内存峰值因此只与「同时在写的图数」有关，与视频时长无关。
  * 拼图交给 sharp 的线程池执行，解码与打分在 JS 线程继续跑，两者重叠。
  * 队列按顺序结算，manifest 的 sheets 顺序与文件序号保持一致。
- * 结算后的 manifest 条目直接写入 spool 文件，不在内存里攒整份 manifest。
+ * 结算后的 manifest 条目直接交给 ManifestSpool 流式写盘，不在内存里攒整份 manifest。
  */
 class SheetWriter {
   constructor(options) {
@@ -58,6 +32,7 @@ class SheetWriter {
     this.perSheet = options.perSheet;
     this.totalSheets = options.totalSheets;
     this.maxInflight = options.maxInflight ?? 2;
+    this.manifest = options.manifest;
 
     this.startSec = options.startSec;
     this.videoName = options.videoName;
@@ -74,15 +49,6 @@ class SheetWriter {
     this.outDir = options.outDir;
     this.dryRun = options.dryRun;
     this.quiet = options.quiet;
-
-    this.spool = createWriteStream(options.spoolPath, { flags: 'w' });
-    this.spoolError = null;
-    // 写回调能拿到错误；这里再记一份，流被销毁后的同步 throw 也能还原成原始原因。
-    this.spool.on('error', (error) => { this.spoolError = error; });
-    this.spoolFirst = true;
-    // 攒到约 1MB 再写，避免几万张图各自触发一次异步写回调。
-    this.spoolPending = [];
-    this.spoolPendingBytes = 0;
 
     this.queue = [];
     this.enqueued = 0;
@@ -173,24 +139,6 @@ class SheetWriter {
     if (this.queue.length > this.maxInflight) await this.shift();
   }
 
-  async appendSpool(chunk) {
-    this.spoolPending.push(chunk);
-    this.spoolPendingBytes += chunk.length;
-    if (this.spoolPendingBytes >= 1024 * 1024) await this.flushSpool();
-  }
-
-  async flushSpool() {
-    if (!this.spoolPending.length) return;
-    const chunk = this.spoolPending.join('');
-    this.spoolPending = [];
-    this.spoolPendingBytes = 0;
-    try {
-      await writeChunk(this.spool, chunk);
-    } catch (error) {
-      throw this.spoolError ?? error;
-    }
-  }
-
   /** 结算最早入队的一张图：写 manifest 片段、累计摘要、释放帧缓冲。 */
   async shift() {
     const job = this.queue.shift();
@@ -218,9 +166,7 @@ class SheetWriter {
       pickedBy: cell.empty ? null : cell.pickedBy,
     }));
 
-    const chunk = (this.spoolFirst ? '' : ',\n') + indentEntry(JSON.stringify(entry, null, 2));
-    this.spoolFirst = false;
-    await this.appendSpool(chunk);
+    await this.manifest.addSheet(entry);
 
     for (const cell of job.cells) {
       if (cell.empty) {
@@ -244,86 +190,22 @@ class SheetWriter {
   async drain() {
     while (this.queue.length) await this.shift();
   }
-
-  /** 等 sheets 片段全部落盘。 */
-  async finish() {
-    await this.flushSpool();
-    try {
-      await new Promise((resolve, reject) => {
-        this.spool.end((error) => (error ? reject(error) : resolve()));
-      });
-    } catch (error) {
-      throw this.spoolError ?? error;
-    }
-  }
-
-  abort() {
-    this.spool.destroy();
-  }
-}
-
-/**
- * 把 manifest 写成与 JSON.stringify(..., null, 2) 完全一致的排版：
- * 先写除 sheets 外的头部，再把 spool 里的逐张图条目拼进来，最后收尾。
- * 这样超长视频的 manifest 不需要在内存里攒成一个大对象或大字符串。
- */
-async function writeManifestFile({ meta, spoolPath, manifestPath, tmpPath }) {
-  const headText = JSON.stringify(meta, null, 2);
-  const head = headText.slice(0, -2) + ',\n  "sheets": [\n';
-
-  const out = createWriteStream(tmpPath, { flags: 'w' });
-  out.on('error', () => {});
-  await writeChunk(out, head);
-
-  let buffered = [];
-  let bufferedBytes = 0;
-  for await (const chunk of createReadStream(spoolPath)) {
-    buffered.push(chunk);
-    bufferedBytes += chunk.length;
-    if (bufferedBytes >= 1024 * 1024) {
-      await writeChunk(out, Buffer.concat(buffered, bufferedBytes));
-      buffered = [];
-      bufferedBytes = 0;
-    }
-  }
-  if (buffered.length) await writeChunk(out, Buffer.concat(buffered, bufferedBytes));
-  await writeChunk(out, '\n  ]\n}');
-  await new Promise((resolve, reject) => {
-    out.end((error) => (error ? reject(error) : resolve()));
-  });
-
-  await rename(tmpPath, manifestPath);
-  // 临时片段清理失败不影响结果，manifest.json 已经就位。
-  await rm(spoolPath, { force: true }).catch(() => {});
-}
-
-/** 需要完整 sheets 的调用方（测试、工具）按需从磁盘读，避免流水线常驻整份 manifest。 */
-function readSheets(manifestPath) {
-  return JSON.parse(readFileSync(manifestPath, 'utf8')).sheets;
 }
 
 export async function run(options) {
+  if (options.adaptive) return runAdaptive(options);
+
   const {
     input, outDir,
     cellWidth, cellHeight, layout, format, quality,
     annotate = true, gap = 4,
     stampPos = 'tl', stampDir = 'h-lr',
-    start = 0, end = null,
-    slotsPerSecond = 20, framesPerSheet = null,
+    slotsPerSecond = 20,
     noiseFloor = 0, blockPx = BLOCK_PX,
     dryRun = false, quiet = false,
   } = options;
 
-  const ext = EXT[format] ?? 'jpg';
-  const { cells: layoutCells } = parseLayout(layout);
-  const perSheet = framesPerSheet ?? layoutCells;
-  if (perSheet < 1) throw new Error('--frames-per-sheet 至少为 1');
-  if (perSheet > layoutCells) throw new Error(capacityError(layout, perSheet, `--frames-per-sheet ${perSheet} 张图片`));
-
-  const startSec = Number(start) || 0;
-  const endSec = end == null ? null : Number(end);
-  if (startSec < 0) throw new Error('--start 不能为负数');
-  if (endSec != null && endSec <= startSec) throw new Error('--end 必须大于 --start');
+  const { ext, layoutCells, perSheet, startSec, endSec } = resolveCommonOptions(options);
 
   const info = await probe(input);
   const segmentDuration = endSec != null ? endSec - startSec : Math.max(info.duration - startSec, 0);
@@ -335,9 +217,8 @@ export async function run(options) {
   });
 
   await mkdir(outDir, { recursive: true });
-  const manifestPath = path.join(outDir, 'manifest.json');
-  const tmpManifestPath = path.join(outDir, '.manifest.json.tmp');
-  const spoolPath = path.join(outDir, '.manifest-sheets.tmp');
+  const manifest = new ManifestSpool({ outDir });
+  const manifestPath = manifest.manifestPath;
 
   const graySampler = getGraySampler(cellWidth, cellHeight);
   const scoreScratch = createScoreScratch(blockPx);
@@ -355,15 +236,14 @@ export async function run(options) {
   let decoded = 0;
   let ptsBase = null;
 
-  let writer = null;
   try {
-    writer = new SheetWriter({
+    const writer = new SheetWriter({
       plan, results, perSheet, totalSheets: plan.sheets,
       startSec, videoName: sanitizeVideoName(input),
       quality, layout, ext,
       cellWidth, cellHeight, format: ext,
       annotate, gap, stampPos, stampDir,
-      outDir, dryRun, quiet, spoolPath,
+      outDir, dryRun, quiet, manifest,
     });
 
     const flushReady = async () => {
@@ -437,7 +317,6 @@ export async function run(options) {
     closedThrough = plan.total - 1;
     await flushReady();
     await writer.drain();
-    await writer.finish();
 
     const meta = {
       tool: 'video-peak-frames',
@@ -476,9 +355,9 @@ export async function run(options) {
       },
     };
 
-    await writeManifestFile({ meta, spoolPath, manifestPath, tmpPath: tmpManifestPath });
+    await manifest.finish(meta);
 
-    const manifest = {
+    return {
       tool: meta.tool,
       version: meta.version,
       input: meta.input,
@@ -493,11 +372,8 @@ export async function run(options) {
         return readSheets(manifestPath);
       },
     };
-    return manifest;
   } catch (error) {
-    if (writer) writer.abort();
-    await rm(spoolPath, { force: true }).catch(() => {});
-    await rm(tmpManifestPath, { force: true }).catch(() => {});
+    await manifest.abort();
     throw error;
   }
 }
