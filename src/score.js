@@ -7,32 +7,78 @@ export const BLOCK_PX = 16;
 
 /**
  * 把 rgb24 帧做区域平均降采样成灰度图。
+ *
+ * 采样网格只与输入尺寸有关，按尺寸缓存采样器，逐帧复用：
+ * 取整、边界与倒数权重都在建表时算好，逐帧只剩像素累加。
  * 区域平均本身就是低通，用来压掉编码噪点与颗粒，避免「变化最大」选到噪点帧。
  */
-export function toGray(rgb, width, height, out = new Uint8Array(SAMPLE_W * SAMPLE_H)) {
+const samplerCache = new Map();
+
+function buildSampler(width, height) {
+  const x0 = new Uint16Array(SAMPLE_W);
+  const x1 = new Uint16Array(SAMPLE_W);
+  const y0 = new Uint16Array(SAMPLE_H);
+  const y1 = new Uint16Array(SAMPLE_H);
+  const invCount = new Float64Array(SAMPLE_W * SAMPLE_H);
   const xStep = width / SAMPLE_W;
   const yStep = height / SAMPLE_H;
 
+  for (let sx = 0; sx < SAMPLE_W; sx++) {
+    const from = Math.floor(sx * xStep);
+    x0[sx] = from;
+    x1[sx] = Math.min(width, Math.max(from + 1, Math.ceil((sx + 1) * xStep)));
+  }
   for (let sy = 0; sy < SAMPLE_H; sy++) {
-    const y0 = Math.floor(sy * yStep);
-    const y1 = Math.min(height, Math.max(y0 + 1, Math.ceil((sy + 1) * yStep)));
+    const from = Math.floor(sy * yStep);
+    const to = Math.min(height, Math.max(from + 1, Math.ceil((sy + 1) * yStep)));
+    y0[sy] = from;
+    y1[sy] = to;
     for (let sx = 0; sx < SAMPLE_W; sx++) {
-      const x0 = Math.floor(sx * xStep);
-      const x1 = Math.min(width, Math.max(x0 + 1, Math.ceil((sx + 1) * xStep)));
-      let sum = 0;
-      let count = 0;
-      for (let y = y0; y < y1; y++) {
-        const row = y * width * 3;
-        for (let x = x0; x < x1; x++) {
-          const p = row + x * 3;
-          sum += 0.299 * rgb[p] + 0.587 * rgb[p + 1] + 0.114 * rgb[p + 2];
-          count++;
-        }
-      }
-      out[sy * SAMPLE_W + sx] = count ? Math.round(sum / count) : 0;
+      invCount[sy * SAMPLE_W + sx] = 1 / ((x1[sx] - x0[sx]) * (to - from));
     }
   }
-  return out;
+
+  return function gray(rgb, out) {
+    let o = 0;
+    for (let sy = 0; sy < SAMPLE_H; sy++) {
+      const fromY = y0[sy];
+      const toY = y1[sy];
+      for (let sx = 0; sx < SAMPLE_W; sx++) {
+        const fromX = x0[sx];
+        const toX = x1[sx];
+        // 先分别累加 R/G/B，再统一乘亮度系数：比逐像素算亮度少一次乘加。
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        for (let y = fromY; y < toY; y++) {
+          let p = (y * width + fromX) * 3;
+          for (let x = fromX; x < toX; x++) {
+            r += rgb[p];
+            g += rgb[p + 1];
+            b += rgb[p + 2];
+            p += 3;
+          }
+        }
+        out[o] = Math.round((0.299 * r + 0.587 * g + 0.114 * b) * invCount[o]);
+        o++;
+      }
+    }
+    return out;
+  };
+}
+
+export function getGraySampler(width, height) {
+  const key = `${width}x${height}`;
+  let sampler = samplerCache.get(key);
+  if (!sampler) {
+    sampler = buildSampler(width, height);
+    samplerCache.set(key, sampler);
+  }
+  return sampler;
+}
+
+export function toGray(rgb, width, height, out = new Uint8Array(SAMPLE_W * SAMPLE_H)) {
+  return getGraySampler(width, height)(rgb, out);
 }
 
 /** 相邻帧平均绝对差（全局均值），0..255 尺度。仅作诊断，不用于排峰。 */
@@ -41,6 +87,40 @@ export function mad(current, previous) {
   let sum = 0;
   for (let i = 0; i < current.length; i++) sum += Math.abs(current[i] - previous[i]);
   return sum / current.length;
+}
+
+/** 每个采样像素所属的块号与块内像素数，只与 blockPx 有关，按值缓存。 */
+const blockMapCache = new Map();
+
+function getBlockMap(blockPx) {
+  let map = blockMapCache.get(blockPx);
+  if (!map) {
+    const cols = Math.ceil(SAMPLE_W / blockPx);
+    const rows = Math.ceil(SAMPLE_H / blockPx);
+    const blockOf = new Uint16Array(SAMPLE_W * SAMPLE_H);
+    const counts = new Uint32Array(cols * rows);
+    for (let y = 0; y < SAMPLE_H; y++) {
+      const row = y * SAMPLE_W;
+      const blockRow = ((y / blockPx) | 0) * cols;
+      for (let x = 0; x < SAMPLE_W; x++) {
+        const block = blockRow + ((x / blockPx) | 0);
+        blockOf[row + x] = block;
+        counts[block]++;
+      }
+    }
+    map = { cols, rows, blockOf, counts };
+    blockMapCache.set(blockPx, map);
+  }
+  return map;
+}
+
+/**
+ * 打分缓冲：逐帧复用，避免每帧重新分配块累加数组。
+ * 值只由 --block-size 决定，一次运行内固定。
+ */
+export function createScoreScratch(blockPx = BLOCK_PX) {
+  const map = getBlockMap(blockPx);
+  return { map, sums: new Float64Array(map.cols * map.rows) };
 }
 
 /**
@@ -56,42 +136,35 @@ export function mad(current, previous) {
  * 因为最大块值恒 >= 全局均值，它天然把「整体变化」和「局部变化」都算作变化大。
  * 块内取平均（而非单像素最大）以保持抗噪能力。
  */
-export function changeScore(current, previous, blockPx = BLOCK_PX) {
+export function changeScore(current, previous, blockPx = BLOCK_PX, scratch = null) {
   if (!previous) {
     return { score: 0, globalMAD: 0, localPeak: 0, blockCols: 0, blockRows: 0 };
   }
-  const cols = Math.ceil(SAMPLE_W / blockPx);
-  const rows = Math.ceil(SAMPLE_H / blockPx);
-  const blockSum = new Float64Array(cols * rows);
-  const blockCount = new Uint32Array(cols * rows);
+  const map = scratch?.map ?? getBlockMap(blockPx);
+  const sums = scratch?.sums ?? new Float64Array(map.cols * map.rows);
+  const { blockOf, counts } = map;
+  sums.fill(0);
 
   let globalSum = 0;
-  for (let y = 0; y < SAMPLE_H; y++) {
-    const brow = ((y / blockPx) | 0) * cols;
-    const row = y * SAMPLE_W;
-    for (let x = 0; x < SAMPLE_W; x++) {
-      const d = Math.abs(current[row + x] - previous[row + x]);
-      globalSum += d;
-      const bi = brow + ((x / blockPx) | 0);
-      blockSum[bi] += d;
-      blockCount[bi]++;
-    }
+  for (let i = 0; i < current.length; i++) {
+    const diff = current[i] - previous[i];
+    const abs = diff < 0 ? -diff : diff;
+    globalSum += abs;
+    sums[blockOf[i]] += abs;
   }
 
   let localPeak = 0;
-  for (let b = 0; b < blockSum.length; b++) {
-    if (blockCount[b] > 0) {
-      const value = blockSum[b] / blockCount[b];
-      if (value > localPeak) localPeak = value;
-    }
+  for (let b = 0; b < sums.length; b++) {
+    const value = sums[b] / counts[b];
+    if (value > localPeak) localPeak = value;
   }
 
   return {
     score: localPeak,
     globalMAD: globalSum / current.length,
     localPeak,
-    blockCols: cols,
-    blockRows: rows,
+    blockCols: map.cols,
+    blockRows: map.rows,
   };
 }
 

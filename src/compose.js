@@ -26,6 +26,13 @@ export function parseLayout(text) {
   return { cols, rows, cells };
 }
 
+/** 格子数不足以容纳所需帧数时的统一报错文案（CLI 与流水线共用）。 */
+export function capacityError(layout, needed, what = `${needed} 张图片`) {
+  const { cols, rows, cells } = parseLayout(layout);
+  return `排版 ${layout}（${cols} 列 × ${rows} 行）只有 ${cells} 格，容纳不下 ${what}。` +
+    `请换更大的排版（如 ${suggestLayout(needed)}），或降低每图帧数`;
+}
+
 /**
  * 时间码合成层。
  *
@@ -114,25 +121,39 @@ function emptyMarkSvg(width, height) {
   );
 }
 
-async function renderCell(cell, cellWidth, cellHeight, stamp) {
+/**
+ * 单格合成层：帧本身（或空帧/未用格底色）、空帧横杠、时间码。
+ * 返回 sharp 的 overlay 描述，由 composeSheet 一次合到整张画布上，
+ * 避免「每格编码成 PNG 再解码回画布」的往返开销。
+ */
+function cellOverlays(cell, cellWidth, cellHeight, stamp, left, top) {
   const unused = cell.unused === true;
-  const empty = !unused && cell.empty;
-  const background = unused ? UNUSED_BG : EMPTY_BG;
+  const empty = !unused && cell.empty === true;
+  const overlays = [];
 
-  let image = cell.buffer && !unused
-    ? sharp(cell.buffer, { raw: { width: cellWidth, height: cellHeight, channels: 3 } })
-    : sharp({ create: { width: cellWidth, height: cellHeight, channels: 3, background } });
+  if (cell.buffer && !unused) {
+    overlays.push({
+      input: cell.buffer,
+      raw: { width: cellWidth, height: cellHeight, channels: 3 },
+      left,
+      top,
+    });
+  } else {
+    overlays.push({
+      input: { create: { width: cellWidth, height: cellHeight, channels: 3, background: unused ? UNUSED_BG : EMPTY_BG } },
+      left,
+      top,
+    });
+  }
 
-  const layers = [];
-  if (empty) layers.push({ input: emptyMarkSvg(cellWidth, cellHeight), left: 0, top: 0 });
+  if (empty) overlays.push({ input: emptyMarkSvg(cellWidth, cellHeight), left, top });
   if (stamp && !unused) {
     const label = empty
       ? `EMPTY ${formatTimecode(cell.stampTime ?? cell.start)}`
       : formatTimecode(cell.stampTime ?? cell.pts ?? cell.start);
-    layers.push({ input: stampSvg(cellWidth, cellHeight, label, stamp), left: 0, top: 0 });
+    overlays.push({ input: stampSvg(cellWidth, cellHeight, label, stamp), left, top });
   }
-  if (layers.length) image = image.composite(layers);
-  return image.png().toBuffer();
+  return overlays;
 }
 
 /** 质量 -> PNG 压缩级别（png 无损，quality 高 = 更快更大）。 */
@@ -148,31 +169,19 @@ export async function composeSheet({
   const { cols, rows, cells: totalCells } = parseLayout(layout);
 
   if (cells.length > totalCells) {
-    throw new Error(
-      `排版 ${layout}（${cols} 列 × ${rows} 行）只有 ${totalCells} 格，` +
-      `容纳不下 ${cells.length} 张图片。请换更大的排版（如 ${suggestLayout(cells.length)}），或降低每图帧数`
-    );
-  }
-
-  const padded = cells.slice();
-  while (padded.length < totalCells) {
-    padded.push({ unused: true, empty: true, start: null });
+    throw new Error(capacityError(layout, cells.length));
   }
 
   const width = cols * cellWidth + (cols + 1) * gap;
   const height = rows * cellHeight + (rows + 1) * gap;
-  const overlays = [];
   const stamp = annotate ? { pos: stampPos, dir: stampDir } : null;
+  const overlays = [];
 
-  for (let i = 0; i < padded.length; i++) {
-    const col = i % cols;
-    const row = Math.floor(i / cols);
-    const png = await renderCell(padded[i], cellWidth, cellHeight, stamp);
-    overlays.push({
-      input: png,
-      left: gap + col * (cellWidth + gap),
-      top: gap + row * (cellHeight + gap),
-    });
+  for (let i = 0; i < totalCells; i++) {
+    const cell = cells[i] ?? { unused: true, empty: true, start: null };
+    const left = gap + (i % cols) * (cellWidth + gap);
+    const top = gap + Math.floor(i / cols) * (cellHeight + gap);
+    overlays.push(...cellOverlays(cell, cellWidth, cellHeight, stamp, left, top));
   }
 
   const image = sharp({ create: { width, height, channels: 3, background: '#FFFFFF' } })
@@ -186,7 +195,7 @@ export async function composeSheet({
 }
 
 function suggestLayout(n) {
-  for (const [cols, rows] of [[n, 1], [1, n], [Math.ceil(n / 2), 2], [Math.ceil(Math.sqrt(n)), Math.ceil(n / Math.ceil(Math.sqrt(n)))]]) {
+  for (const [cols, rows] of [[n, 1], [1, n], [Math.ceil(n / 2), 2], [Math.ceil(Math.sqrt(n)), Math.ceil(n / Math.ceil(Math.sqrt(n)))]] ) {
     if (cols * rows >= n && cols * rows <= 64) return `${cols}x${rows}`;
   }
   return '2x2';

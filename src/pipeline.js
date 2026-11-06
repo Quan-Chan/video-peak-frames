@@ -1,10 +1,14 @@
 import { mkdir, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { probe } from './probe.js';
 import { decodeFrames } from './decode.js';
-import { toGray, changeScore, BLOCK_PX, SAMPLE_W, SAMPLE_H } from './score.js';
+import { getGraySampler, changeScore, createScoreScratch, BLOCK_PX, SAMPLE_W, SAMPLE_H } from './score.js';
 import { planSlots, slotIndexOf } from './slots.js';
-import { composeSheet, parseLayout } from './compose.js';
+import { composeSheet, parseLayout, capacityError } from './compose.js';
+
+// 版本号只有 package.json 一个来源，manifest 与发布物不会对不上。
+const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
 const EXT = { jpg: 'jpg', jpeg: 'jpg', png: 'png', webp: 'webp' };
 
@@ -26,6 +30,131 @@ export function buildFileName({ videoName, startSec, endSec, quality, layout, in
   return `${videoName}__t${fmtSec(startSec)}s-${fmtSec(endSec)}s__q${quality}__${layout}__${String(index).padStart(5, '0')}.${ext}`;
 }
 
+/**
+ * 单张图的写队列。
+ *
+ * 一张图的帧全部确定后立即合成，不再等全片解码完；帧缓冲在合成完成后释放。
+ * 内存峰值因此只与「同时在写的图数」有关，与视频时长无关。
+ * 拼图交给 sharp 的线程池执行，解码与打分在 JS 线程继续跑，两者重叠。
+ * 队列按顺序结算，manifest 的 sheets 顺序与文件序号保持一致。
+ */
+class SheetWriter {
+  constructor(options) {
+    this.slots = options.slots;
+    this.perSheet = options.perSheet;
+    this.totalSheets = options.totalSheets;
+    this.maxInflight = options.maxInflight ?? 2;
+
+    this.startSec = options.startSec;
+    this.videoName = options.videoName;
+    this.quality = options.quality;
+    this.layout = options.layout;
+    this.ext = options.ext;
+    this.cellWidth = options.cellWidth;
+    this.cellHeight = options.cellHeight;
+    this.format = options.format;
+    this.annotate = options.annotate;
+    this.gap = options.gap;
+    this.stampPos = options.stampPos;
+    this.stampDir = options.stampDir;
+    this.outDir = options.outDir;
+    this.dryRun = options.dryRun;
+    this.quiet = options.quiet;
+
+    this.sheets = [];
+    this.queue = [];
+    this.enqueued = 0;
+  }
+
+  /** 入队第 sheetIndex 张图。队列满时先结算最早的一张。 */
+  async write(sheetIndex) {
+    const { slots, perSheet } = this;
+    const cells = slots.slice(sheetIndex * perSheet, (sheetIndex + 1) * perSheet);
+    const absStart = this.startSec + cells[0].start;
+    const absEnd = this.startSec + cells[cells.length - 1].end;
+    const file = buildFileName({
+      videoName: this.videoName,
+      startSec: absStart,
+      endSec: absEnd,
+      quality: this.quality,
+      layout: this.layout,
+      index: sheetIndex + 1,
+      ext: this.ext,
+    });
+
+    // 图上时间码用原片绝对时间，便于对照视频播放器。
+    const cellForCompose = cells.map((cell) => ({
+      ...cell,
+      stampTime: cell.empty ? this.startSec + cell.start : this.startSec + (cell.pts ?? cell.start),
+    }));
+
+    let done;
+    if (this.dryRun) {
+      done = Promise.resolve(null);
+    } else {
+      done = composeSheet({
+        cells: cellForCompose,
+        cellWidth: this.cellWidth,
+        cellHeight: this.cellHeight,
+        layout: this.layout,
+        outFile: path.join(this.outDir, file),
+        format: this.format,
+        quality: this.quality,
+        annotate: this.annotate,
+        gap: this.gap,
+        stampPos: this.stampPos,
+        stampDir: this.stampDir,
+      });
+    }
+    // 失败在 shift 里重新抛出；这里先挂一个空处理，避免队列中其余图触发未捕获拒绝。
+    done.catch(() => {});
+
+    this.queue.push({ index: sheetIndex + 1, name: file, file: this.dryRun ? null : file, span: [absStart, absEnd], cells, composed: cellForCompose, done });
+    if (this.queue.length > this.maxInflight) await this.shift();
+  }
+
+  /** 结算最早入队的一张图：记录 manifest 条目、释放帧缓冲。 */
+  async shift() {
+    const job = this.queue.shift();
+    const size = await job.done;
+
+    const entry = {
+      index: job.index,
+      file: job.file,
+      span: [Number(job.span[0].toFixed(4)), Number(job.span[1].toFixed(4))],
+    };
+    if (size) {
+      entry.width = size.width;
+      entry.height = size.height;
+    }
+    entry.cells = job.composed.map((cell) => ({
+      slot: cell.slot,
+      start: Number((this.startSec + cell.start).toFixed(4)),
+      empty: cell.empty,
+      reason: cell.empty ? cell.reason : null,
+      pts: cell.empty ? null : Number((this.startSec + cell.pts).toFixed(6)),
+      frameIndex: cell.empty ? null : cell.frameIndex,
+      score: cell.empty ? null : cell.score,
+      globalMAD: cell.empty ? null : cell.globalMAD,
+      candidates: cell.candidates,
+      pickedBy: cell.empty ? null : cell.pickedBy,
+    }));
+    this.sheets.push(entry);
+
+    for (const cell of job.cells) cell.buffer = null;
+    for (const cell of job.composed) cell.buffer = null;
+
+    if (!this.quiet) {
+      const filled = job.cells.filter((cell) => !cell.empty).length;
+      console.log(`[${job.index}/${this.totalSheets}] ${job.name}  有效帧 ${filled}/${this.perSheet}`);
+    }
+  }
+
+  async drain() {
+    while (this.queue.length) await this.shift();
+  }
+}
+
 export async function run(options) {
   const {
     input, outDir,
@@ -39,22 +168,17 @@ export async function run(options) {
   } = options;
 
   const ext = EXT[format] ?? 'jpg';
-  const { cells: layoutCells, cols, rows } = parseLayout(layout);
+  const { cells: layoutCells } = parseLayout(layout);
   const perSheet = framesPerSheet ?? layoutCells;
   if (perSheet < 1) throw new Error('--frames-per-sheet 至少为 1');
-  if (perSheet > layoutCells) {
-    throw new Error(
-      `排版 ${layout}（${cols} 列 × ${rows} 行）只有 ${layoutCells} 格，` +
-      `容纳不下 --frames-per-sheet ${perSheet} 张图片。请换更大的排版或降低每图帧数`
-    );
-  }
+  if (perSheet > layoutCells) throw new Error(capacityError(layout, perSheet, `--frames-per-sheet ${perSheet} 张图片`));
 
   const startSec = Number(start) || 0;
   const endSec = end == null ? null : Number(end);
   if (startSec < 0) throw new Error('--start 不能为负数');
   if (endSec != null && endSec <= startSec) throw new Error('--end 必须大于 --start');
 
-  const info = await probe(input, { start: startSec, end: endSec });
+  const info = await probe(input);
   const segmentDuration = endSec != null ? endSec - startSec : Math.max(info.duration - startSec, 0);
 
   // 槽数只由用户给定的区间决定，末帧不得顶出额外的槽。
@@ -63,13 +187,36 @@ export async function run(options) {
   });
   const { slots } = plan;
 
+  const graySampler = getGraySampler(cellWidth, cellHeight);
+  const scoreScratch = createScoreScratch(blockPx);
+  const grayBuffers = [new Uint8Array(SAMPLE_W * SAMPLE_H), new Uint8Array(SAMPLE_W * SAMPLE_H)];
+  let grayIndex = 0;
   let previousGray = null;
+
   let currentSlot = -1;
+  let closedThrough = -1;
   let best = null;
   let mid = null;
   let candidateCount = 0;
   let decoded = 0;
   let ptsBase = null;
+
+  await mkdir(outDir, { recursive: true });
+  const writer = new SheetWriter({
+    slots, perSheet, totalSheets: plan.sheets,
+    startSec, videoName: sanitizeVideoName(input),
+    quality, layout, ext,
+    cellWidth, cellHeight, format: ext,
+    annotate, gap, stampPos, stampDir,
+    outDir, dryRun, quiet,
+  });
+
+  const flushReady = async () => {
+    while (writer.enqueued < plan.sheets && (writer.enqueued + 1) * perSheet - 1 <= closedThrough) {
+      await writer.write(writer.enqueued);
+      writer.enqueued++;
+    }
+  };
 
   const closeSlot = () => {
     if (currentSlot < 0 || currentSlot >= slots.length || candidateCount === 0) return;
@@ -86,7 +233,8 @@ export async function run(options) {
     slot.score = Number((best?.score ?? 0).toFixed(3));
     slot.globalMAD = Number((best?.globalMAD ?? 0).toFixed(3));
     slot.pickedBy = hasPeak ? 'peak' : 'mid-slot';
-    slot.buffer = picked.buffer;
+    // --dry-run 只要数值，不保留像素，避免大视频白占内存。
+    slot.buffer = dryRun ? null : picked.buffer;
   };
 
   for await (const frame of decodeFrames({
@@ -104,18 +252,23 @@ export async function run(options) {
 
     if (slotIndex !== currentSlot) {
       closeSlot();
-      // 中间跳过的槽保持 empty=true，即「分不到帧的位置加入空帧」。
+      // 换槽后，序号小于新槽的槽都不会再有帧，可以交出已完整的那几张图。
+      closedThrough = Math.min(slotIndex - 1, slots.length - 1);
       currentSlot = slotIndex;
       best = null;
       mid = null;
       candidateCount = 0;
+      if (closedThrough >= 0) await flushReady();
     }
 
-    const gray = toGray(frame.buffer, cellWidth, cellHeight);
-    const change = changeScore(gray, previousGray, blockPx);
-    previousGray = gray;
-
+    // 区间之外的尾部帧不参与打分（时间戳单调递增，不会再有槽内帧）。
     if (slotIndex >= slots.length) continue;
+
+    const currentGray = grayBuffers[grayIndex];
+    graySampler(frame.buffer, currentGray);
+    const change = changeScore(currentGray, previousGray, blockPx, scoreScratch);
+    previousGray = currentGray;
+    grayIndex ^= 1;
 
     const score = change.score;
     const candidate = {
@@ -127,74 +280,22 @@ export async function run(options) {
     candidateCount++;
   }
   closeSlot();
-
-  await mkdir(outDir, { recursive: true });
-  const videoName = sanitizeVideoName(input);
-  const sheets = [];
-
-  for (let j = 0; j < plan.sheets; j++) {
-    const cells = slots.slice(j * perSheet, (j + 1) * perSheet);
-    const absStart = startSec + cells[0].start;
-    const absEnd = startSec + cells[cells.length - 1].end;
-    const file = buildFileName({
-      videoName,
-      startSec: absStart, endSec: absEnd,
-      quality, layout, index: j + 1, ext,
-    });
-
-    // 图上时间码用原片绝对时间，便于对照视频播放器。
-    const cellForCompose = cells.map((cell) => ({
-      ...cell,
-      stampTime: cell.empty ? startSec + cell.start : startSec + (cell.pts ?? cell.start),
-    }));
-
-    let size = null;
-    if (!dryRun) {
-      size = await composeSheet({
-        cells: cellForCompose, cellWidth, cellHeight, layout,
-        outFile: path.join(outDir, file),
-        format: format === 'jpeg' ? 'jpg' : format,
-        quality, annotate, gap, stampPos, stampDir,
-      });
-    }
-
-    sheets.push({
-      index: j + 1,
-      file: dryRun ? null : file,
-      span: [Number(absStart.toFixed(4)), Number(absEnd.toFixed(4))],
-      ...(size ? { width: size.width, height: size.height } : {}),
-      cells: cellForCompose.map((cell) => ({
-        slot: cell.slot,
-        start: Number((startSec + cell.start).toFixed(4)),
-        empty: cell.empty,
-        reason: cell.empty ? cell.reason : null,
-        pts: cell.empty ? null : Number((startSec + cell.pts).toFixed(6)),
-        frameIndex: cell.empty ? null : cell.frameIndex,
-        score: cell.empty ? null : cell.score,
-        globalMAD: cell.empty ? null : cell.globalMAD,
-        candidates: cell.candidates,
-        pickedBy: cell.empty ? null : cell.pickedBy,
-      })),
-    });
-    cells.forEach((cell) => { cell.buffer = null; });
-    if (!quiet) {
-      const filled = cells.filter((cell) => !cell.empty).length;
-      console.log(`[${j + 1}/${plan.sheets}] ${file}  有效帧 ${filled}/${perSheet}`);
-    }
-  }
+  closedThrough = slots.length - 1;
+  await flushReady();
+  await writer.drain();
 
   const emptySlots = slots.filter((slot) => slot.empty);
   const manifest = {
     tool: 'video-peak-frames',
-    version: '0.2.0',
+    version: pkg.version,
     input: path.resolve(input),
     generatedAt: new Date().toISOString(),
     range: { start: startSec, end: endSec ?? startSec + segmentDuration },
-    fileNamePattern: `${videoName}__t<起s>-<止s>__q<质量>__<排版>__<序号>.${ext}`,
+    fileNamePattern: `${sanitizeVideoName(input)}__t<起s>-<止s>__q<质量>__<排版>__<序号>.${ext}`,
     params: {
       slotsPerSecond, framesPerSheet: perSheet,
       slotSeconds: plan.slotSec,
-      layout, layoutCells: layoutCells, cell: [cellWidth, cellHeight],
+      layout, layoutCells, cell: [cellWidth, cellHeight],
       format: ext, quality,
       annotate, stampPos, stampDir,
       metric: 'local-peak', blockPx, sample: [SAMPLE_W, SAMPLE_H], noiseFloor,
@@ -219,7 +320,7 @@ export async function run(options) {
         'beyond-duration': emptySlots.filter((s) => s.reason === 'beyond-duration').length,
       },
     },
-    sheets,
+    sheets: writer.sheets,
   };
 
   await writeFile(path.join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
