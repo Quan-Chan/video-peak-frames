@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process';
 import { ffmpegPath } from './probe.js';
 
 const PTS_RE = /n:\s*(\d+)\s+pts:\s*\S+\s+pts_time:([-\d.eE+]+)/;
+/** 等 showinfo 行的兜底上限：正常远小于此值，只防解析器异常时卡死。 */
+const PTS_WAIT_TIMEOUT_MS = 10000;
 
 /**
  * 单遍流式解码。滤镜链末尾挂 showinfo，把每帧的 pts_time 打到 stderr，
@@ -30,8 +32,17 @@ export async function* decodeFrames({ input, cellWidth, cellHeight, start = 0, e
   });
 
   const ptsByIndex = [];
+  const ptsWaiters = new Map();
   let lineBuf = '';
   let stderrText = '';
+
+  const resolveWaiter = (index, pts) => {
+    const waiter = ptsWaiters.get(index);
+    if (!waiter) return;
+    ptsWaiters.delete(index);
+    waiter(pts);
+  };
+
   proc.stderr.setEncoding('utf8');
   proc.stderr.on('data', (chunk) => {
     stderrText = (stderrText + chunk).slice(-16384);
@@ -41,33 +52,66 @@ export async function* decodeFrames({ input, cellWidth, cellHeight, start = 0, e
       const line = lineBuf.slice(0, nl);
       lineBuf = lineBuf.slice(nl + 1);
       const match = PTS_RE.exec(line);
-      if (match) ptsByIndex[Number(match[1])] = Number(match[2]);
+      if (match) {
+        const index = Number(match[1]);
+        const pts = Number(match[2]);
+        ptsByIndex[index] = pts;
+        resolveWaiter(index, pts);
+      }
     }
   });
 
   const closed = new Promise((resolve) => {
     proc.once('error', (error) => resolve({ error }));
     proc.once('close', (code) => resolve({ code }));
+  }).then((result) => {
+    // 进程结束时还没等到 showinfo 行的帧按缺失处理，避免等待永久挂起。
+    for (const index of [...ptsWaiters.keys()]) resolveWaiter(index, null);
+    return result;
+  });
+
+  /**
+   * 取第 index 帧的时间戳。像素数据与 showinfo 日志走 stdout/stderr 两条管道，
+   * 日志可能晚于像素到达；此时等解析器确认，而不是用帧率推算顶替真实时间戳
+   * （推算会抹平 VFR 间隔，让帧落进错误的槽）。日志丢失或进程结束则返回 null。
+   */
+  const waitPts = (index) => new Promise((resolve) => {
+    if (ptsByIndex[index] !== undefined) {
+      resolve(ptsByIndex[index]);
+      return;
+    }
+    const timer = setTimeout(() => resolveWaiter(index, null), PTS_WAIT_TIMEOUT_MS);
+    ptsWaiters.set(index, (pts) => {
+      clearTimeout(timer);
+      resolve(pts);
+    });
   });
 
   const frameSize = cellWidth * cellHeight * 3;
-  let pending = Buffer.alloc(0);
+  // 按帧尺寸累加：管道分块边界与帧边界无关，逐块拼到整帧后再交出。
+  // 交出的缓冲区归调用方所有，下一帧重新分配，避免与后续读取互相覆盖。
+  let frame = Buffer.allocUnsafe(frameSize);
+  let filled = 0;
   let index = 0;
   let streamError = null;
 
   try {
     for await (const chunk of proc.stdout) {
-      pending = pending.length ? Buffer.concat([pending, chunk]) : chunk;
-      while (pending.length >= frameSize) {
-        const frame = Buffer.from(pending.subarray(0, frameSize));
-        pending = pending.subarray(frameSize);
+      let offset = 0;
+      while (offset < chunk.length) {
+        const take = Math.min(chunk.length - offset, frameSize - filled);
+        chunk.copy(frame, filled, offset, offset + take);
+        filled += take;
+        offset += take;
+        if (filled < frameSize) continue;
+
         const current = index++;
-        if (ptsByIndex[current] === undefined) {
-          // showinfo 的日志先于该帧像素写出，正常情况到这里已就绪；
-          // 让出一轮事件循环，保证 stderr 回调先执行完。
-          await new Promise(setImmediate);
-        }
-        yield { index: current, buffer: frame, pts: ptsByIndex[current] ?? null };
+        const pts = ptsByIndex[current] !== undefined
+          ? ptsByIndex[current]
+          : await waitPts(current);
+        yield { index: current, buffer: frame, pts };
+        frame = Buffer.allocUnsafe(frameSize);
+        filled = 0;
       }
     }
   } catch (error) {
