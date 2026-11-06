@@ -35,7 +35,7 @@ The frame with the highest change in a slot is selected. When the change does no
 
 ### Adaptive sampling
 
-With `--adaptive` the sampling rate is no longer fixed. `--max-fps` defines the base grid (its reciprocal is the slot width), and the timeline is divided into windows of `--adapt-window` seconds, one second by default.
+With `--adaptive` the sampling rate is no longer fixed. `--max-fps` defines the base grid (its reciprocal is the slot width), and the timeline is divided into fixed one-second windows for activity statistics.
 
 Inside a window, every base slot keeps the highest-change candidate frame. The window activity is the mean change of those slots, counting only slots that have a frame.
 A target frame rate is mapped linearly from the activity: at or below `--adapt-low` it is `--min-fps`, at or above `--adapt-high` it is `--max-fps`, with a proportional transition in between.
@@ -46,11 +46,11 @@ A sheet therefore covers a time span that depends on the amount of change, and e
 
 ### Fixed-budget sampling
 
-With `--budget` the total frame count is fixed by the budget: `round(--budget-fps × range duration)`. The default budget is 15 fps; each window (`--adapt-window`, one second by default) is clamped between 1 and 30 frames (`--min-fps` / `--max-fps`).
+With `--budget` the total frame count is fixed by the budget: `round(--budget-fps × range duration)`. The default budget is 15 fps; each one-second window is clamped between 1 and 30 frames (`--min-fps` / `--max-fps`).
 
 Budget mode first scans the whole range once: `--max-fps` defines the base grid (its reciprocal is the slot width), every base slot keeps the highest-change candidate frame, and only its score is retained; no pixels are kept in this pass.
 
-Before allocation the window activity is smoothed over time: about 1.2 seconds on the way up and 3.5 seconds on the way down, followed by a [2,1,1] forward weighting over the latest three windows. After a change ends the frame rate falls back gradually, and brief dips in activity no longer cause a sudden drop.
+Before allocation the window activity is smoothed over time: about 1.2 seconds on the way up and the decay constant from `--budget-decay` (3.5 seconds by default) on the way down, followed by a [2,1,1] forward weighting over the latest three windows. After a change ends the frame rate falls back gradually, and brief dips in activity no longer cause a sudden drop; a larger decay constant makes the fall slower.
 
 The frame budget is then allocated smoothly under the constraint that every window stays within its bounds and the total is exact: the weight of a window is the square root of its smoothed activity, which compresses the influence of spike segments so that moderately changing segments are not pushed to their lower bound. This is equivalent to maximizing the sum of `sqrt(activity) × log(frames)`; the continuous optimum is `clamp(λ × sqrt(activity), lower, upper)`. A bisection finds the unique λ, and the largest-remainder method rounds the result while keeping the total frame count exact.
 
@@ -108,7 +108,7 @@ node bin/cli.mjs input.mp4 -o out --budget --budget-fps 10 --max-fps 30
 | `--budget-fps` | `15` | Budget average frame rate, 1-240, between `--min-fps` and `--max-fps` |
 | `--min-fps` | adaptive `2` / budget `1` | Lower bound of the frame rate |
 | `--max-fps` | adaptive `--slots-per-second` / budget `30` | Upper bound of the frame rate, which also sets the base grid density |
-| `--adapt-window` | `1` | Statistics window in seconds, 0-10 |
+| `--budget-decay` | `3.5` | Activity decay time constant in seconds for budget mode, 0.1-60; larger falls back more slowly |
 | `--adapt-low` | `1` | Activity at or below this value uses the lower rate |
 | `--adapt-high` | `40` | Activity at or above this value uses the upper rate |
 | `--format` | `jpg` | `jpg` / `png` / `webp`; `jpeg` is an alias of `jpg` |
@@ -142,7 +142,7 @@ clip__t5.00s-5.40s__q90__2x2__00001.jpg
 
 `manifest.json` contains `range`, `params`, `source`, `summary`, and `sheets`. Each entry of `sheets` corresponds to one image and records its time range and, per cell, the slot number, timestamp, score, candidate count, and selection basis.
 
-In adaptive and budget modes the file name format is unchanged, but the time span of each image varies with the density. Adaptive mode sets `params.mode` to `adaptive` and records `minFps`, `maxFps`, `adaptWindow`, `adaptLow`, and `adaptHigh`; budget mode sets `params.mode` to `budget` and records `budgetFps`, `budgetFrames`, `minFps`, `maxFps`, `adaptWindow`, and `allocator`. In both modes every cell additionally records `end`, `duration`, `window`, and `windowFps`, and `summary` gains `windows` and `avgFps`.
+In adaptive and budget modes the file name format is unchanged, but the time span of each image varies with the density. Adaptive mode sets `params.mode` to `adaptive` and records `minFps`, `maxFps`, `windowSeconds`, `adaptLow`, and `adaptHigh`; budget mode sets `params.mode` to `budget` and records `budgetFps`, `budgetFrames`, `minFps`, `maxFps`, `windowSeconds`, `activityDecaySeconds`, and `allocator`. In both modes every cell additionally records `end`, `duration`, `window`, and `windowFps`, and `summary` gains `windows` and `avgFps`.
 
 Entries of `sheets` are appended to disk image by image instead of being accumulated in memory, and the slot table is materialized per image. Memory use therefore does not grow with the length of the input.
 

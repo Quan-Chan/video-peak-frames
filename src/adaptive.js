@@ -15,7 +15,6 @@ const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url),
 /** 自适应模式的默认值；CLI 与直接调用共用。 */
 export const ADAPTIVE_DEFAULTS = Object.freeze({
   minFps: 2,
-  adaptWindow: 1,
   adaptLow: 1,
   adaptHigh: 40,
 });
@@ -100,7 +99,7 @@ export function splitWindowSegments({
   return segments;
 }
 
-function validateAdaptiveOptions({ minFps, maxFps, adaptWindow, adaptLow, adaptHigh, cellWidth, cellHeight }) {
+function validateAdaptiveOptions({ minFps, maxFps, adaptLow, adaptHigh, cellWidth, cellHeight }) {
   const int = (value, name, min, max) => {
     if (!Number.isInteger(value) || value < min || value > max) {
       throw new Error(`${name} 应为 ${min}-${max} 的整数，收到：${value}`);
@@ -109,20 +108,18 @@ function validateAdaptiveOptions({ minFps, maxFps, adaptWindow, adaptLow, adaptH
   int(minFps, '--min-fps', 1, 240);
   int(maxFps, '--max-fps', 1, 240);
   if (minFps > maxFps) throw new Error('--min-fps 不能大于 --max-fps');
-  if (!Number.isFinite(adaptWindow) || adaptWindow <= 0 || adaptWindow > 10) {
-    throw new Error(`--adapt-window 应为 0-10 之间的正数，收到：${adaptWindow}`);
-  }
   if (!Number.isFinite(adaptLow) || !Number.isFinite(adaptHigh) || adaptLow < 0 || adaptHigh <= adaptLow) {
     throw new Error('--adapt-low / --adapt-high 需满足 0 <= low < high');
   }
 
-  const windowSlots = Math.max(1, Math.round(adaptWindow * maxFps));
+  // 统计窗口固定为 1 秒：槽率由 --max-fps 决定，窗口槽数就是 maxFps。
+  const windowSlots = Math.max(1, maxFps);
   const bufferMB = (windowSlots * 2 * cellWidth * cellHeight * 3) / (1024 * 1024);
   if (bufferMB > MAX_WINDOW_BUFFER_MB) {
     throw new Error(
       `自适应模式需要缓存约 ${bufferMB.toFixed(0)}MB 的窗口帧缓冲（--max-fps ${maxFps}、` +
-      `--adapt-window ${adaptWindow}s、单格 ${cellWidth}x${cellHeight}），超过 ${MAX_WINDOW_BUFFER_MB}MB 上限。` +
-      '请调小 --max-fps、--adapt-window 或 --cell'
+      `单格 ${cellWidth}x${cellHeight}），超过 ${MAX_WINDOW_BUFFER_MB}MB 上限。` +
+      '请调小 --max-fps 或 --cell'
     );
   }
   return windowSlots;
@@ -137,7 +134,6 @@ export async function runAdaptive(options) {
     slotsPerSecond = 20,
     minFps = ADAPTIVE_DEFAULTS.minFps,
     maxFps = null,
-    adaptWindow = ADAPTIVE_DEFAULTS.adaptWindow,
     adaptLow = ADAPTIVE_DEFAULTS.adaptLow,
     adaptHigh = ADAPTIVE_DEFAULTS.adaptHigh,
     noiseFloor = 0, blockPx = BLOCK_PX,
@@ -147,7 +143,7 @@ export async function runAdaptive(options) {
   const { ext, layoutCells, perSheet, startSec, endSec } = resolveCommonOptions(options);
   const upperFps = Math.round(maxFps ?? slotsPerSecond);
   const windowSlotsPerWindow = validateAdaptiveOptions({
-    minFps, maxFps: upperFps, adaptWindow, adaptLow, adaptHigh, cellWidth, cellHeight,
+    minFps, maxFps: upperFps, adaptLow, adaptHigh, cellWidth, cellHeight,
   });
 
   const info = await probe(input);
@@ -317,7 +313,7 @@ export async function runAdaptive(options) {
         minFps, maxFps: upperFps, framesPerSheet: perSheet,
         slotSeconds: slotSec,
         baseSlotSeconds: slotSec,
-        adaptWindow, adaptLow, adaptHigh,
+        windowSeconds: 1, adaptLow, adaptHigh,
         adaptMetric: 'window-mean-local-peak',
         layout, layoutCells, cell: [cellWidth, cellHeight],
         format: ext, quality,

@@ -21,7 +21,7 @@ export const BUDGET_DEFAULTS = Object.freeze({
   budgetFps: 15,
   minFps: 1,
   maxFps: 30,
-  adaptWindow: 1,
+  decaySeconds: 3.5,
 });
 
 /**
@@ -54,12 +54,12 @@ function baseSlotIndex(pts, maxFps) {
 /**
  * 窗口活动度的时间平滑参数。
  *
- * 上升用约 1.2 秒的时间常数，保证画面开始变化时帧率能及时跟上；
- * 下降用约 3.5 秒的时间常数，让变化结束后帧率缓慢回落，而不是突然掉帧。
+ * 上升固定用约 1.2 秒的时间常数，保证画面开始变化时帧率能及时跟上；
+ * 下降使用可配置的衰减时间常数（--budget-decay，默认 3.5 秒），
+ * 让变化结束后帧率缓慢回落，而不是突然掉帧。
  * 最后再对最近三个窗口做 [2,1,1] 的前向加权，抹平剩余折角。
  */
 const ACTIVITY_ATTACK_SECONDS = 1.2;
-const ACTIVITY_RELEASE_SECONDS = 3.5;
 const ACTIVITY_TRAILING_WEIGHTS = Object.freeze([2, 1, 1]);
 
 /**
@@ -70,9 +70,10 @@ const ACTIVITY_TRAILING_WEIGHTS = Object.freeze([2, 1, 1]);
  *
  * @param {number[]} activities 原始窗口活动度
  * @param {number[]} durations 每个窗口的时长（秒）
+ * @param {number} releaseSeconds 下降阶段的时间常数（秒），越大衰减越慢
  * @returns {number[]} 平滑后的窗口活动度
  */
-export function smoothWindowActivity(activities, durations) {
+export function smoothWindowActivity(activities, durations, releaseSeconds = BUDGET_DEFAULTS.decaySeconds) {
   const envelope = new Array(activities.length);
   for (let index = 0; index < activities.length; index++) {
     if (index === 0) {
@@ -81,7 +82,7 @@ export function smoothWindowActivity(activities, durations) {
     }
     const previous = envelope[index - 1];
     const rising = activities[index] > previous;
-    const timeConstant = rising ? ACTIVITY_ATTACK_SECONDS : ACTIVITY_RELEASE_SECONDS;
+    const timeConstant = rising ? ACTIVITY_ATTACK_SECONDS : releaseSeconds;
     const alpha = 1 - Math.exp(-durations[index] / timeConstant);
     envelope[index] = previous + alpha * (activities[index] - previous);
   }
@@ -405,7 +406,7 @@ function planSegments({ records, windows, counts, segmentDuration }) {
 }
 
 /** 预算模式参数校验；报错文案与 CLI 保持一致。 */
-function validateBudgetOptions({ budgetFps, minFps, maxFps, adaptWindow }) {
+function validateBudgetOptions({ budgetFps, minFps, maxFps, decaySeconds }) {
   const int = (value, name, min, max) => {
     if (!Number.isInteger(value) || value < min || value > max) {
       throw new Error(`${name} 应为 ${min}-${max} 的整数，收到：${value}`);
@@ -417,8 +418,8 @@ function validateBudgetOptions({ budgetFps, minFps, maxFps, adaptWindow }) {
   if (minFps > maxFps) throw new Error('--min-fps 不能大于 --max-fps');
   if (budgetFps < minFps) throw new Error('--budget-fps 不能小于 --min-fps');
   if (budgetFps > maxFps) throw new Error('--budget-fps 不能大于 --max-fps');
-  if (!Number.isFinite(adaptWindow) || adaptWindow <= 0 || adaptWindow > 10) {
-    throw new Error(`--adapt-window 应为 0-10 之间的正数，收到：${adaptWindow}`);
+  if (!Number.isFinite(decaySeconds) || decaySeconds < 0.1 || decaySeconds > 60) {
+    throw new Error(`--budget-decay 应为 0.1-60 之间的秒数，收到：${decaySeconds}`);
   }
 }
 
@@ -491,12 +492,12 @@ export async function runBudget(options) {
     budgetFps = BUDGET_DEFAULTS.budgetFps,
     minFps = BUDGET_DEFAULTS.minFps,
     maxFps = BUDGET_DEFAULTS.maxFps,
-    adaptWindow = BUDGET_DEFAULTS.adaptWindow,
+    decaySeconds = BUDGET_DEFAULTS.decaySeconds,
     noiseFloor = 0, blockPx = BLOCK_PX,
     dryRun = false, quiet = false,
   } = options;
 
-  validateBudgetOptions({ budgetFps, minFps, maxFps, adaptWindow });
+  validateBudgetOptions({ budgetFps, minFps, maxFps, decaySeconds });
   const { ext, layoutCells, perSheet, startSec, endSec } = resolveCommonOptions(options);
 
   const info = await probe(input);
@@ -505,7 +506,8 @@ export async function runBudget(options) {
 
   const slotSec = 1 / maxFps;
   const totalSlots = Math.max(1, Math.ceil(segmentDuration / slotSec - 1e-9));
-  const windowSlots = Math.max(1, Math.round(adaptWindow * maxFps));
+  // 统计窗口固定为 1 秒，窗口槽数就是 maxFps。
+  const windowSlots = Math.max(1, maxFps);
   const sourceFps = info.avgFrameRate > 0 ? info.avgFrameRate : info.rFrameRate;
   const totalFrames = Math.max(1, Math.round(budgetFps * segmentDuration));
 
@@ -520,6 +522,7 @@ export async function runBudget(options) {
   const smoothedActivities = smoothWindowActivity(
     windows.map((window) => window.activity),
     windows.map((window) => window.duration),
+    decaySeconds,
   );
   for (let index = 0; index < windows.length; index++) {
     windows[index].activity = smoothedActivities[index];
@@ -576,11 +579,12 @@ export async function runBudget(options) {
         slotSeconds: slotSec,
         baseSlotSeconds: slotSec,
         baseSlotFps: maxFps,
-        adaptWindow, windowSlots,
+        windowSeconds: 1,
+        windowSlots,
         allocator: 'smoothed-sqrt-activity-proportional',
         activityWeightExponent: 0.5,
         activityAttackSeconds: ACTIVITY_ATTACK_SECONDS,
-        activityReleaseSeconds: ACTIVITY_RELEASE_SECONDS,
+        activityDecaySeconds: decaySeconds,
         activityTrailingWeights: ACTIVITY_TRAILING_WEIGHTS,
         layout, layoutCells, cell: [cellWidth, cellHeight],
         format: ext, quality,

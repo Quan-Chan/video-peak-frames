@@ -42,7 +42,7 @@ async function buildManifests(video, base) {
   const uniformDir = path.join(WORK_ROOT, base, 'uniform');
   const budget = await run({
     input: video, outDir: budgetDir, ...BASE_CELL, ...BASE_IMAGE,
-    budget: true, budgetFps: 15, minFps: 1, maxFps: 30, adaptWindow: 1,
+    budget: true, budgetFps: 15, minFps: 1, maxFps: 30,
     noiseFloor: 0, dryRun: true, quiet: true,
   });
   const uniform = await run({

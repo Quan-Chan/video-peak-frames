@@ -35,7 +35,7 @@
 
 ### 自适应采样
 
-开启 `--adaptive` 后，采样频率不再固定。以 `--max-fps` 为基准网格（槽宽为其倒数），按 `--adapt-window` 秒（默认 1 秒）划分窗口。
+开启 `--adaptive` 后，采样频率不再固定。以 `--max-fps` 为基准网格（槽宽为其倒数），按固定 1 秒的窗口统计活动度。
 
 每个窗口中，每个基准槽保留候选帧里变化量最大的一帧。窗口活动度取这些槽变化量的平均值（只看有帧的槽）。
 由活动度线性映射出目标帧率：活动度不高于 `--adapt-low` 时取 `--min-fps`，不低于 `--adapt-high` 时取 `--max-fps`，中间按比例过渡。
@@ -46,11 +46,11 @@
 
 ### 固定预算采样
 
-开启 `--budget` 后，总帧数由预算决定：`round(--budget-fps × 区间时长)`。默认预算 15 fps；每个窗口（`--adapt-window`，默认 1 秒）帧数下限 1、上限 30（`--min-fps` / `--max-fps`）。
+开启 `--budget` 后，总帧数由预算决定：`round(--budget-fps × 区间时长)`。默认预算 15 fps；每个 1 秒窗口帧数下限 1、上限 30（`--min-fps` / `--max-fps`）。
 
 预算模式需要先完整扫描一遍：以 `--max-fps` 为基准网格（槽宽为其倒数），每个基准槽保留候选帧里变化量最大的一帧并记录得分，这一遍不保留像素。
 
-分配前先对窗口活动度做时间平滑：上升用约 1.2 秒、下降用约 3.5 秒的时间常数，再对最近三个窗口做 [2,1,1] 前向加权。画面变化结束后帧率会缓慢回落，短暂的活动度下降也不会让帧率突然掉下去。
+分配前先对窗口活动度做时间平滑：上升用约 1.2 秒、下降用 `--budget-decay` 指定的时间常数（默认 3.5 秒），再对最近三个窗口做 [2,1,1] 前向加权。画面变化结束后帧率会缓慢回落，短暂的活动度下降也不会让帧率突然掉下去；衰减常数越大，回落越慢。
 
 随后在「每窗口帧数有上下限、总帧数固定」的约束下做平滑分配：权重取平滑后活动度的平方根，压缩尖峰片段的影响，避免变化中等的片段被尖峰片段挤到下限。目标等价于最大化各窗口 `sqrt(活动度) × log(帧数)` 之和，连续最优解为 `clamp(λ × sqrt(活动度), 下限, 上限)`；对 λ 二分求出唯一解后，用最大余数法取整，保证总帧数精确等于预算。
 
@@ -108,7 +108,7 @@ node bin/cli.mjs input.mp4 -o out --budget --budget-fps 10 --max-fps 30
 | `--budget-fps` | `15` | 预算平均帧率，1-240，需在 `--min-fps` 与 `--max-fps` 之间 |
 | `--min-fps` | 自适应 `2` / 预算 `1` | 每秒抽帧下限 |
 | `--max-fps` | 自适应 `--slots-per-second` / 预算 `30` | 每秒抽帧上限，同时决定基准网格密度 |
-| `--adapt-window` | `1` | 统计窗口，秒，范围 0-10 |
+| `--budget-decay` | `3.5` | 预算模式活动度衰减时间常数，秒，范围 0.1-60；越大掉帧越慢 |
 | `--adapt-low` | `1` | 活动度不高于该值时使用下限帧率 |
 | `--adapt-high` | `40` | 活动度不低于该值时使用上限帧率 |
 | `--format` | `jpg` | `jpg` / `png` / `webp`；`jpeg` 等价于 `jpg` |
@@ -142,7 +142,7 @@ clip__t5.00s-5.40s__q90__2x2__00001.jpg
 
 `manifest.json` 含 `range`、`params`、`source`、`summary`、`sheets` 五段。`sheets` 每项对应一张图片，记录时间区间与逐格的槽号、时间戳、得分、候选帧数、选中依据。
 
-自适应与预算模式下文件名格式不变，但每张图的时间跨度随密度变化。自适应模式 `params.mode` 为 `adaptive`，记录 `minFps`、`maxFps`、`adaptWindow`、`adaptLow`、`adaptHigh`；预算模式 `params.mode` 为 `budget`，记录 `budgetFps`、`budgetFrames`、`minFps`、`maxFps`、`adaptWindow`、`allocator`。两种模式的每格都额外记录 `end`、`duration`、`window` 与 `windowFps`，`summary` 增加 `windows` 与 `avgFps`。
+自适应与预算模式下文件名格式不变，但每张图的时间跨度随密度变化。自适应模式 `params.mode` 为 `adaptive`，记录 `minFps`、`maxFps`、`windowSeconds`、`adaptLow`、`adaptHigh`；预算模式 `params.mode` 为 `budget`，记录 `budgetFps`、`budgetFrames`、`minFps`、`maxFps`、`windowSeconds`、`activityDecaySeconds`、`allocator`。两种模式的每格都额外记录 `end`、`duration`、`window` 与 `windowFps`，`summary` 增加 `windows` 与 `avgFps`。
 
 `sheets` 在运行过程中逐张图写入磁盘，不在内存里累积整份记录；槽表也按图物化。因此超长视频的内存占用不随片长增长。
 

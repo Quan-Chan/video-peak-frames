@@ -68,12 +68,12 @@ const BASE = {
   layout: '2x2', format: 'jpg', quality: 80,
   annotate: true, gap: 2,
   budget: true, budgetFps: 10, minFps: 1, maxFps: 30,
-  adaptWindow: 1, noiseFloor: 0, dryRun: true, quiet: true,
+  noiseFloor: 0, dryRun: true, quiet: true,
 };
 
-test('预算默认值：15 fps 预算、每窗口 1-30 帧', () => {
+test('预算默认值：15 fps 预算、每窗口 1-30 帧、衰减 3.5 秒', () => {
   assert.deepEqual(BUDGET_DEFAULTS, {
-    budgetFps: 15, minFps: 1, maxFps: 30, adaptWindow: 1,
+    budgetFps: 15, minFps: 1, maxFps: 30, decaySeconds: 3.5,
   });
 });
 
@@ -92,6 +92,12 @@ test('活动度平滑：上升快、下降慢，输出保持在原始范围内',
   for (const value of [...rise, ...decay]) {
     assert.ok(value >= 0 && value <= 100);
   }
+
+  // 衰减时间常数越大，同样一个静止窗口里保留的帧率越高。
+  const fast = smoothWindowActivity([100, 0, 0, 0, 0], durations, 0.5);
+  const slow = smoothWindowActivity([100, 0, 0, 0, 0], durations, 10);
+  assert.ok(slow[1] > fast[1]);
+  assert.ok(slow[3] > fast[3]);
 });
 
 test('预算分配：总帧数精确，且每窗口在上下限内', () => {
@@ -253,14 +259,36 @@ test('CLI --budget 默认 15 fps、每窗口 1-30 帧', () => {
   assert.equal(manifest.params.budgetFps, 15);
   assert.equal(manifest.params.minFps, 1);
   assert.equal(manifest.params.maxFps, 30);
+  assert.equal(manifest.params.activityDecaySeconds, 3.5);
   assert.equal(manifest.params.budgetFrames, 60);
   assert.equal(manifest.summary.slots, 60);
+});
+
+test('CLI --budget-decay 可调，并写入 manifest', () => {
+  const outDir = path.join(tmp, 'cli-decay');
+  const result = spawnSync(process.execPath, [
+    'bin/cli.mjs', motion60, '-o', outDir, '--budget', '--budget-decay', '8', '--dry-run', '--quiet',
+  ], { encoding: 'utf8', windowsHide: true });
+  assert.equal(result.status, 0, result.stderr);
+  const manifest = JSON.parse(readFileSync(path.join(outDir, 'manifest.json'), 'utf8'));
+  assert.equal(manifest.params.activityDecaySeconds, 8);
+  assert.equal(manifest.params.activityAttackSeconds, 1.2);
+});
+
+test('已移除 --adapt-window', () => {
+  const result = spawnSync(process.execPath, [
+    'bin/cli.mjs', motion60, '-o', path.join(tmp, 'removed-window'),
+    '--budget', '--adapt-window', '2', '--quiet',
+  ], { encoding: 'utf8', windowsHide: true });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr + result.stdout, /错误/);
 });
 
 test('预算参数非法或实际不可行时明确报错', () => {
   const bad = [
     [ '--budget', '--budget-fps', '31', '--max-fps', '30' ],
     [ '--budget', '--budget-fps', '5', '--min-fps', '10' ],
+    [ '--budget', '--budget-decay', '0' ],
     [ '--budget', '--adaptive' ],
   ];
   for (const args of bad) {

@@ -47,7 +47,7 @@ const BASE = {
   cellWidth: 160, cellHeight: 90,
   layout: '2x2', format: 'jpg', quality: 80,
   annotate: true, gap: 2,
-  adaptive: true, minFps: 2, maxFps: 20, adaptWindow: 1, adaptLow: 1, adaptHigh: 40,
+  adaptive: true, minFps: 2, maxFps: 20, adaptLow: 1, adaptHigh: 40,
   noiseFloor: 0, dryRun: true, quiet: true,
 };
 
@@ -179,7 +179,6 @@ test('自适应 --dry-run 只写 manifest.json', async () => {
 test('自适应参数非法时明确报错', () => {
   const cases = [
     ['--min-fps', '30', '--max-fps', '20'],
-    ['--adapt-window', '0'],
     ['--adapt-low', '40', '--adapt-high', '1'],
   ];
   for (const args of cases) {
