@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { ffmpegPath, ensureBinaries } from '../src/probe.js';
 import { run } from '../src/pipeline.js';
-import { allocateBudget, BUDGET_DEFAULTS } from '../src/budget.js';
+import { allocateBudget, smoothWindowActivity, BUDGET_DEFAULTS } from '../src/budget.js';
 
 const exec = promisify(execFile);
 let tmp;
@@ -75,6 +75,23 @@ test('预算默认值：15 fps 预算、每窗口 1-30 帧', () => {
   assert.deepEqual(BUDGET_DEFAULTS, {
     budgetFps: 15, minFps: 1, maxFps: 30, adaptWindow: 1,
   });
+});
+
+test('活动度平滑：上升快、下降慢，输出保持在原始范围内', () => {
+  const durations = new Array(10).fill(1);
+  const rise = smoothWindowActivity([0, 100, 100, 100, 100, 100, 100, 100, 100, 100], durations);
+  assert.ok(rise[1] > 30 && rise[1] < 100);
+  assert.ok(rise[2] > rise[1]);
+  assert.ok(rise[4] > 85);
+
+  const decay = smoothWindowActivity([100, 0, 0, 0, 0, 0, 0, 0, 0, 0], durations);
+  assert.ok(decay[1] > 60 && decay[1] < 100);
+  assert.ok(decay[2] < decay[1] && decay[2] > 30);
+  assert.ok(decay[3] < decay[2]);
+
+  for (const value of [...rise, ...decay]) {
+    assert.ok(value >= 0 && value <= 100);
+  }
 });
 
 test('预算分配：总帧数精确，且每窗口在上下限内', () => {
@@ -166,9 +183,15 @@ test('预算：安静段少抽、运动段多抽，区段连续且帧数精确',
   assert.ok(moving.length > quiet.length * 2, '疏密比不足：quiet=' + quiet.length + ' moving=' + moving.length);
 
   const perWindow = new Map();
-  for (const cell of cells) perWindow.set(cell.window, (perWindow.get(cell.window) || 0) + 1);
-  for (const count of perWindow.values()) {
-    assert.ok(count >= 1 && count <= 30, '窗口帧数越界：' + count);
+  for (const cell of cells) {
+    if (!perWindow.has(cell.window)) perWindow.set(cell.window, []);
+    perWindow.get(cell.window).push(cell);
+  }
+  for (const windowCells of perWindow.values()) {
+    assert.ok(windowCells.length >= 1 && windowCells.length <= 30, '窗口帧数越界：' + windowCells.length);
+    // 同一窗口内每帧应占据等长的子段，播放帧率才会均匀（manifest 保留 4 位小数）。
+    const lengths = windowCells.map((cell) => cell.end - cell.start);
+    assert.ok(Math.max(...lengths) - Math.min(...lengths) < 2e-3, '窗口内帧没有均匀铺开');
   }
 
   const files = (await readdir(outDir)).filter((name) => name.endsWith('.jpg'));

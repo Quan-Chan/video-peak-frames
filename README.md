@@ -50,7 +50,11 @@ With `--budget` the total frame count is fixed by the budget: `round(--budget-fp
 
 Budget mode first scans the whole range once: `--max-fps` defines the base grid (its reciprocal is the slot width), every base slot keeps the highest-change candidate frame, and only its score is retained; no pixels are kept in this pass.
 
-The frame budget is then allocated smoothly under the constraint that every window stays within its bounds and the total is exact: the weight of a window is the square root of its mean activity, which compresses the influence of spike segments so that moderately changing segments are not pushed to their lower bound. This is equivalent to maximizing the sum of `sqrt(activity) × log(frames)`; the continuous optimum is `clamp(λ × sqrt(activity), lower, upper)`. A bisection finds the unique λ, and the largest-remainder method rounds the result while keeping the total frame count exact.
+Before allocation the window activity is smoothed over time: about 1.2 seconds on the way up and 3.5 seconds on the way down, followed by a [2,1,1] forward weighting over the latest three windows. After a change ends the frame rate falls back gradually, and brief dips in activity no longer cause a sudden drop.
+
+The frame budget is then allocated smoothly under the constraint that every window stays within its bounds and the total is exact: the weight of a window is the square root of its smoothed activity, which compresses the influence of spike segments so that moderately changing segments are not pushed to their lower bound. This is equivalent to maximizing the sum of `sqrt(activity) × log(frames)`; the continuous optimum is `clamp(λ × sqrt(activity), lower, upper)`. A bisection finds the unique λ, and the largest-remainder method rounds the result while keeping the total frame count exact.
+
+After allocation every window is split into equal-length sub-segments, one per frame, and each sub-segment keeps its highest-score candidate. The playback frame rate inside a window therefore matches its allocated frame count, with no burst at the start and no long freeze at the end.
 
 Selected slots are sorted by time and consecutive frames form the segments: the first segment starts at the range start and the last one ends at the range end. Every segment occupies one cell and may have a different duration; the last sheet may be partially filled.
 

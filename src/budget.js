@@ -51,6 +51,55 @@ function baseSlotIndex(pts, maxFps) {
   return Math.max(0, Math.floor((pts + PTS_BOUNDARY_EPSILON) * maxFps + 1e-9));
 }
 
+/**
+ * 窗口活动度的时间平滑参数。
+ *
+ * 上升用约 1.2 秒的时间常数，保证画面开始变化时帧率能及时跟上；
+ * 下降用约 3.5 秒的时间常数，让变化结束后帧率缓慢回落，而不是突然掉帧。
+ * 最后再对最近三个窗口做 [2,1,1] 的前向加权，抹平剩余折角。
+ */
+const ACTIVITY_ATTACK_SECONDS = 1.2;
+const ACTIVITY_RELEASE_SECONDS = 3.5;
+const ACTIVITY_TRAILING_WEIGHTS = Object.freeze([2, 1, 1]);
+
+/**
+ * 对窗口活动度做时间平滑：上升快、下降慢。
+ *
+ * 单窗口的活动度抖动（例如短暂停顿、鼠标划过）不会立刻把帧率拉低，
+ * 高活动结束后帧率也会在几个窗口内逐渐衰减，避免相邻窗口之间突然跳变。
+ *
+ * @param {number[]} activities 原始窗口活动度
+ * @param {number[]} durations 每个窗口的时长（秒）
+ * @returns {number[]} 平滑后的窗口活动度
+ */
+export function smoothWindowActivity(activities, durations) {
+  const envelope = new Array(activities.length);
+  for (let index = 0; index < activities.length; index++) {
+    if (index === 0) {
+      envelope[index] = activities[index];
+      continue;
+    }
+    const previous = envelope[index - 1];
+    const rising = activities[index] > previous;
+    const timeConstant = rising ? ACTIVITY_ATTACK_SECONDS : ACTIVITY_RELEASE_SECONDS;
+    const alpha = 1 - Math.exp(-durations[index] / timeConstant);
+    envelope[index] = previous + alpha * (activities[index] - previous);
+  }
+
+  // 前向低通：当前窗口带上前两个窗口的余温，进一步减少折角；不使用未来窗口，避免动作提前。
+  return envelope.map((value, index) => {
+    let sum = 0;
+    let weightSum = 0;
+    for (let offset = 0; offset < ACTIVITY_TRAILING_WEIGHTS.length; offset++) {
+      const source = index - offset;
+      if (source < 0) continue;
+      sum += envelope[source] * ACTIVITY_TRAILING_WEIGHTS[offset];
+      weightSum += ACTIVITY_TRAILING_WEIGHTS[offset];
+    }
+    return sum / weightSum;
+  });
+}
+
 /** 创建第一遍扫描用的槽记录；内存只与「时长 × maxFps」有关，与源帧数无关。 */
 function createSlotRecords(totalSlots) {
   return {
@@ -149,8 +198,10 @@ async function scanSlotRecords({
 }
 
 /**
- * 按分析窗口聚合候选槽，并把每个窗口的候选槽按 peakScore 降序排列。
- * slots 与 scores 一一对应；activity 是窗口平均活动度，用于预算分配。
+ * 按分析窗口聚合候选槽。
+ *
+ * entries 按槽号（时间）升序保存每个候选槽的得分，后面在每个窗口内均匀铺帧时使用；
+ * activity 是窗口平均活动度，先用于时间平滑，再用于预算分配。
  */
 function buildWindows(records, totalSlots, windowSlots, slotSec, segmentDuration) {
   const windowCount = Math.max(1, Math.ceil(totalSlots / windowSlots));
@@ -158,23 +209,26 @@ function buildWindows(records, totalSlots, windowSlots, slotSec, segmentDuration
   for (let index = 0; index < windowCount; index++) {
     const start = index * windowSlots * slotSec;
     const end = Math.min(segmentDuration, (index + 1) * windowSlots * slotSec);
-    windows[index] = { duration: Math.max(0, end - start), slots: [], scores: [] };
+    windows[index] = {
+      start,
+      end,
+      duration: Math.max(0, end - start),
+      entries: [],
+      activity: 0,
+      candidateCount: 0,
+    };
   }
 
   for (let slot = 0; slot < totalSlots; slot++) {
     if (records.frameIndex[slot] < 0) continue;
     const windowIndex = Math.min(windowCount - 1, Math.floor(slot / windowSlots));
-    windows[windowIndex].slots.push(slot);
-    windows[windowIndex].scores.push(records.peakScore[slot]);
+    windows[windowIndex].entries.push({ slot, score: records.peakScore[slot] });
   }
 
   for (const window of windows) {
-    const order = window.slots.map((_, index) => index);
-    order.sort((a, b) => (window.scores[b] - window.scores[a]) || (window.slots[a] - window.slots[b]));
-    window.slots = order.map((index) => window.slots[index]);
-    window.scores = order.map((index) => window.scores[index]);
-    window.activity = window.scores.length
-      ? window.scores.reduce((sum, score) => sum + score, 0) / window.scores.length
+    window.candidateCount = window.entries.length;
+    window.activity = window.candidateCount
+      ? window.entries.reduce((sum, entry) => sum + entry.score, 0) / window.candidateCount
       : 0;
   }
   return windows;
@@ -189,8 +243,8 @@ function buildWindows(records, totalSlots, windowSlots, slotSec, segmentDuration
  * F_i = clamp(λ · sqrt(activity_i), L_i, U_i)；对 λ 二分即可得到唯一解。
  *
  * @param {object} options
- * @param {Array<{duration:number, activity?:number, scores:number[]}>} options.windows
- *   每个窗口的候选得分（降序）与平均活动度
+ * @param {Array<{duration:number, activity?:number, candidateCount?:number, scores?:number[]}>} options.windows
+ *   每个窗口的候选数、平均活动度（scores 只用于兼容单元测试中的候选数）
  * @param {number} options.totalFrames 预算总帧数（整数）
  * @param {number} options.minFps 每窗口下限帧率
  * @param {number} options.maxFps 每窗口上限帧率
@@ -210,7 +264,7 @@ export function allocateBudget({ windows, totalFrames, minFps, maxFps }) {
 
   for (let index = 0; index < windows.length; index++) {
     const window = windows[index];
-    const candidates = window.scores.length;
+    const candidates = window.candidateCount ?? window.scores?.length ?? 0;
     durationTotal += window.duration;
     // 用 floor 而不是 ceil：不足一个完整窗口的尾段不应被硬凑出一帧。
     const low = Math.min(candidates, Math.max(0, Math.floor(minFps * window.duration + 1e-9)));
@@ -295,36 +349,59 @@ export function allocateBudget({ windows, totalFrames, minFps, maxFps }) {
 }
 
 /**
- * 把选中的基准槽翻译成连续区段。
+ * 把每个窗口分到的帧均匀铺到窗口内，再拼成连续区段。
  *
- * 第一段从区间起点开始，之后每段从自身帧所在槽开始，最后一段覆盖到区间终点，
- * 因此所有区段首尾相接、覆盖整个区间；段长就是「这帧要显示多久」。
+ * 窗口按帧数切成等长子段，每段取段内得分最高的候选帧；这样窗口内的实际播放帧率
+ * 就是分到的帧数，不会出现「几帧挤在开头、后半段停住」的突发感。
+ * 区段首尾相接覆盖整个区间；没有候选帧的窗口留下空洞，由前一段延伸过去。
  */
-function planSegments({ records, slots, slotSec, segmentDuration, windows, counts, windowSlots }) {
-  return slots.map((baseSlot, index) => {
-    const start = index === 0 ? 0 : baseSlot * slotSec;
-    const end = index + 1 < slots.length ? slots[index + 1] * slotSec : segmentDuration;
-    const windowIndex = Math.min(windows.length - 1, Math.floor(baseSlot / windowSlots));
-    return {
-      slot: index,
-      baseSlot,
-      start,
-      end,
-      empty: false,
-      reason: null,
-      pts: records.pts[baseSlot],
-      frameIndex: records.frameIndex[baseSlot],
-      score: Number(records.pickedScore[baseSlot].toFixed(3)),
-      globalMAD: Number(records.globalMAD[baseSlot].toFixed(3)),
-      candidates: records.candidates[baseSlot],
-      pickedBy: records.pickedBy[baseSlot] === 0 ? 'peak' : 'mid-slot',
-      buffer: null,
-      window: windowIndex,
-      windowFps: windows[windowIndex].duration > 0
-        ? counts[windowIndex] / windows[windowIndex].duration
-        : 0,
-    };
-  });
+function planSegments({ records, windows, counts, segmentDuration }) {
+  const segments = [];
+
+  for (let windowIndex = 0; windowIndex < windows.length; windowIndex++) {
+    const window = windows[windowIndex];
+    const count = counts[windowIndex];
+    if (count <= 0) continue;
+    const candidates = window.entries;
+
+    for (let part = 0; part < count; part++) {
+      const from = Math.floor((part * candidates.length) / count);
+      const to = Math.floor(((part + 1) * candidates.length) / count);
+      let picked = candidates[from];
+      for (let index = from + 1; index < to; index++) {
+        if (candidates[index].score > picked.score) picked = candidates[index];
+      }
+      segments.push({
+        slot: segments.length,
+        baseSlot: picked.slot,
+        start: window.start + (window.duration * part) / count,
+        end: window.start + (window.duration * (part + 1)) / count,
+        empty: false,
+        reason: null,
+        pts: records.pts[picked.slot],
+        frameIndex: records.frameIndex[picked.slot],
+        score: Number(records.pickedScore[picked.slot].toFixed(3)),
+        globalMAD: Number(records.globalMAD[picked.slot].toFixed(3)),
+        candidates: records.candidates[picked.slot],
+        pickedBy: records.pickedBy[picked.slot] === 0 ? 'peak' : 'mid-slot',
+        buffer: null,
+        window: windowIndex,
+        windowFps: window.duration > 0 ? count / window.duration : 0,
+      });
+    }
+  }
+
+  // 没有候选帧的窗口会留下时间空洞：让前一段延伸过去，保持区段首尾相接。
+  let cursor = 0;
+  for (const segment of segments) {
+    if (segment.start > cursor + 1e-9) segment.start = cursor;
+    cursor = segment.end;
+  }
+  if (segments.length) {
+    segments[0].start = 0;
+    if (segmentDuration > cursor) segments[segments.length - 1].end = segmentDuration;
+  }
+  return segments;
 }
 
 /** 预算模式参数校验；报错文案与 CLI 保持一致。 */
@@ -438,19 +515,18 @@ export async function runBudget(options) {
     maxFps, totalSlots, sourceFps, noiseFloor, blockPx,
   });
   const windows = buildWindows(records, totalSlots, windowSlots, slotSec, segmentDuration);
-  const { counts } = allocateBudget({ windows, totalFrames, minFps, maxFps });
 
-  // 每个窗口取分数最高的 counts[w] 个槽，再按时间排序，形成全局帧序列。
-  const selectedSlots = [];
+  // 先对窗口活动度做时间平滑，再按平滑结果分配，避免相邻窗口帧率突变。
+  const smoothedActivities = smoothWindowActivity(
+    windows.map((window) => window.activity),
+    windows.map((window) => window.duration),
+  );
   for (let index = 0; index < windows.length; index++) {
-    for (let rank = 0; rank < counts[index]; rank++) selectedSlots.push(windows[index].slots[rank]);
+    windows[index].activity = smoothedActivities[index];
   }
-  selectedSlots.sort((a, b) => a - b);
 
-  const segments = planSegments({
-    records, slots: selectedSlots, slotSec, segmentDuration,
-    windows, counts, windowSlots,
-  });
+  const { counts } = allocateBudget({ windows, totalFrames, minFps, maxFps });
+  const segments = planSegments({ records, windows, counts, segmentDuration });
   const plannedSheets = Math.ceil(segments.length / perSheet);
 
   if (!quiet) {
@@ -501,8 +577,11 @@ export async function runBudget(options) {
         baseSlotSeconds: slotSec,
         baseSlotFps: maxFps,
         adaptWindow, windowSlots,
-        allocator: 'sqrt-activity-proportional',
+        allocator: 'smoothed-sqrt-activity-proportional',
         activityWeightExponent: 0.5,
+        activityAttackSeconds: ACTIVITY_ATTACK_SECONDS,
+        activityReleaseSeconds: ACTIVITY_RELEASE_SECONDS,
+        activityTrailingWeights: ACTIVITY_TRAILING_WEIGHTS,
         layout, layoutCells, cell: [cellWidth, cellHeight],
         format: ext, quality,
         annotate, stampPos, stampDir,
