@@ -19,7 +19,7 @@ export const ADAPTIVE_DEFAULTS = Object.freeze({
   adaptHigh: 40,
 });
 
-/** 窗口内候选帧缓冲的内存估算上限，防止大格子/高帧率/大窗口撑爆内存。 */
+/** 窗口内候选帧缓冲的内存估算上限，防止大格子/高帧率撑爆内存。 */
 const MAX_WINDOW_BUFFER_MB = 256;
 
 /**

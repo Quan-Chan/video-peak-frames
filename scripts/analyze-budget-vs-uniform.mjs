@@ -19,14 +19,12 @@ const BASE_CELL = { cellWidth: 480, cellHeight: 270 };
 const BASE_IMAGE = { layout: '2x2', format: 'jpg', quality: 90, annotate: true, gap: 4 };
 
 function stats(values) {
-  if (!values.length) return { count: 0, mean: 0, median: 0, p90: 0, max: 0 };
+  if (!values.length) return { mean: 0, p90: 0, max: 0 };
   const sorted = values.slice().sort((a, b) => a - b);
   const sum = sorted.reduce((total, value) => total + value, 0);
   const at = (ratio) => sorted[Math.min(sorted.length - 1, Math.floor(ratio * sorted.length))];
   return {
-    count: sorted.length,
     mean: sum / sorted.length,
-    median: at(0.5),
     p90: at(0.9),
     max: sorted[sorted.length - 1],
   };

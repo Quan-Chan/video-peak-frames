@@ -102,8 +102,8 @@ test('活动度平滑：上升快、下降慢，输出保持在原始范围内',
 
 test('预算分配：总帧数精确，且每窗口在上下限内', () => {
   const windows = [
-    { duration: 1, scores: [10, 8, 6] },
-    { duration: 1, scores: [5, 4, 3] },
+    { duration: 1, activity: 8, candidateCount: 3 },
+    { duration: 1, activity: 4, candidateCount: 3 },
   ];
   const result = allocateBudget({ windows, totalFrames: 5, minFps: 1, maxFps: 3 });
   assert.equal(result.counts.reduce((sum, count) => sum + count, 0), 5);
@@ -116,8 +116,8 @@ test('预算分配：总帧数精确，且每窗口在上下限内', () => {
 
 test('预算分配：按活动度平方根分配，中等窗口不会被尖峰窗口挤到下限', () => {
   const windows = [
-    { duration: 1, activity: 9, scores: new Array(30).fill(10) },
-    { duration: 1, activity: 1, scores: new Array(30).fill(10) },
+    { duration: 1, activity: 9, candidateCount: 30 },
+    { duration: 1, activity: 1, candidateCount: 30 },
   ];
   const result = allocateBudget({ windows, totalFrames: 20, minFps: 1, maxFps: 30 });
   // 权重 sqrt(9):sqrt(1) = 3:1，20 帧应分成 15:5，而不是接近 18:2。
@@ -126,23 +126,23 @@ test('预算分配：按活动度平方根分配，中等窗口不会被尖峰�
 
 test('预算分配：同等变化时各窗口均分', () => {
   const windows = Array.from({ length: 3 }, () => ({
-    duration: 1, activity: 9, scores: new Array(10).fill(10),
+    duration: 1, activity: 9, candidateCount: 10,
   }));
   const result = allocateBudget({ windows, totalFrames: 12, minFps: 1, maxFps: 10 });
   assert.deepEqual(result.counts, [4, 4, 4]);
 });
 
 test('预算分配：同分时均匀铺开，不扎堆在最早窗口', () => {
-  const windows = Array.from({ length: 4 }, () => ({ duration: 1, scores: [5, 5, 5] }));
+  const windows = Array.from({ length: 4 }, () => ({ duration: 1, activity: 5, candidateCount: 3 }));
   const result = allocateBudget({ windows, totalFrames: 8, minFps: 1, maxFps: 3 });
   assert.deepEqual(result.counts, [2, 2, 2, 2]);
 });
 
 test('预算分配：无候选帧的窗口不参与分配', () => {
   const windows = [
-    { duration: 1, scores: [9, 5] },
-    { duration: 1, scores: [] },
-    { duration: 1, scores: [7, 3] },
+    { duration: 1, activity: 7, candidateCount: 2 },
+    { duration: 1, activity: 0, candidateCount: 0 },
+    { duration: 1, activity: 5, candidateCount: 2 },
   ];
   const result = allocateBudget({ windows, totalFrames: 3, minFps: 1, maxFps: 2 });
   assert.deepEqual(result.counts, [2, 0, 1]);
@@ -151,14 +151,14 @@ test('预算分配：无候选帧的窗口不参与分配', () => {
 test('预算分配：不可行时明确报错并给出可达范围', () => {
   assert.throws(
     () => allocateBudget({
-      windows: [{ duration: 1, scores: [1, 2, 3] }],
+      windows: [{ duration: 1, activity: 2, candidateCount: 3 }],
       totalFrames: 4, minFps: 1, maxFps: 3,
     }),
     /超过可达上限/,
   );
   assert.throws(
     () => allocateBudget({
-      windows: [{ duration: 1, scores: [1, 2, 3] }],
+      windows: [{ duration: 1, activity: 2, candidateCount: 3 }],
       totalFrames: 0, minFps: 1, maxFps: 3,
     }),
     /低于分配下限/,

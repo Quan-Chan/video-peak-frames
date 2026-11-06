@@ -244,8 +244,8 @@ function buildWindows(records, totalSlots, windowSlots, slotSec, segmentDuration
  * F_i = clamp(λ · sqrt(activity_i), L_i, U_i)；对 λ 二分即可得到唯一解。
  *
  * @param {object} options
- * @param {Array<{duration:number, activity?:number, candidateCount?:number, scores?:number[]}>} options.windows
- *   每个窗口的候选数、平均活动度（scores 只用于兼容单元测试中的候选数）
+ * @param {Array<{duration:number, activity:number, candidateCount:number}>} options.windows
+ *   每个窗口的候选数与平均活动度
  * @param {number} options.totalFrames 预算总帧数（整数）
  * @param {number} options.minFps 每窗口下限帧率
  * @param {number} options.maxFps 每窗口上限帧率
@@ -265,7 +265,7 @@ export function allocateBudget({ windows, totalFrames, minFps, maxFps }) {
 
   for (let index = 0; index < windows.length; index++) {
     const window = windows[index];
-    const candidates = window.candidateCount ?? window.scores?.length ?? 0;
+    const candidates = window.candidateCount ?? 0;
     durationTotal += window.duration;
     // 用 floor 而不是 ceil：不足一个完整窗口的尾段不应被硬凑出一帧。
     const low = Math.min(candidates, Math.max(0, Math.floor(minFps * window.duration + 1e-9)));
@@ -295,9 +295,7 @@ export function allocateBudget({ windows, totalFrames, minFps, maxFps }) {
   // 指数 0.5 是平滑程度的核心：越小越照顾中等变化片段，越大越接近按原始活动度比例分配。
   const ACTIVITY_WEIGHT_EXPONENT = 0.5;
   const weights = windows.map((window) => {
-    const activity = window.activity ?? (window.scores.length
-      ? window.scores.reduce((sum, score) => sum + score, 0) / window.scores.length
-      : 0);
+    const activity = window.activity ?? 0;
     return activity > 0 ? Math.pow(activity, ACTIVITY_WEIGHT_EXPONENT) : 0;
   });
   // 全片完全静止时权重全为 0，退化为按窗口时长等权分配。
