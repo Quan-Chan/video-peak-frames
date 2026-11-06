@@ -9,7 +9,7 @@ Video frame extraction tool. It splits a video into fixed-length time slots, pic
 - Time range, slots per second, image format and quality, layout, and frames per image are configurable.
 - A timecode can be composited into the images, with selectable position and text direction.
 - File names carry the video name, time range, image quality, and layout.
-- Each sheet is composed as soon as its frames are known, and frame buffers are released immediately, so memory use does not grow with video length.
+- Each sheet is composed as soon as its frames are known, and frame buffers are released immediately; the manifest is written incrementally, so memory use does not grow with video length.
 - `manifest.json` records the timestamp, score, candidate count, and selection basis of every slot.
 
 ## Algorithm
@@ -100,6 +100,8 @@ clip__t5.00s-5.40s__q90__2x2__00001.jpg
 ```
 
 `manifest.json` contains `range`, `params`, `source`, `summary`, and `sheets`. Each entry of `sheets` corresponds to one image and records its time range and, per cell, the slot number, timestamp, score, candidate count, and selection basis.
+
+Entries of `sheets` are appended to disk image by image instead of being accumulated in memory, and the slot table is materialized per image. Memory use therefore does not grow with the length of the input.
 
 ## Test
 

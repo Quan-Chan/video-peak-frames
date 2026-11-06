@@ -175,6 +175,18 @@ test('png 与 webp 输出走同一套合成路径', async () => {
   }
 });
 
+test('run 返回的 sheets 按需读取，与 manifest.json 一致且无临时文件残留', async () => {
+  const outDir = path.join(tmp, 'lazy');
+  const manifest = await run({ ...BASE, input: video, outDir, start: 0, end: 0.4, dryRun: false });
+
+  const onDisk = JSON.parse(await readFile(path.join(outDir, 'manifest.json'), 'utf8'));
+  assert.equal(manifest.sheets.length, onDisk.sheets.length);
+  assert.deepEqual(manifest.sheets, onDisk.sheets);
+
+  const files = await readdir(outDir);
+  assert.ok(!files.some((name) => name.startsWith('.manifest')), `存在临时文件：${files.join(', ')}`);
+});
+
 test('九种位置与四种方向都能生成合成层', () => {
   for (const pos of STAMP_POS) {
     for (const dir of STAMP_DIR) {

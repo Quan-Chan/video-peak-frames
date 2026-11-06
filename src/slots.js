@@ -5,11 +5,13 @@ export function slotIndexOf(pts, slotsPerSecond = 20) {
 }
 
 /**
- * 预先铺好定长槽网格。网格长度恒定且补齐到 framesPerSheet 的整数倍，
- * 每个槽永远占一个格子；没有源帧落入的槽保留 empty=true，由 compose 画成空帧。
- * 槽位按时间索引固定，绝不因为缺帧而把后面的帧左移压实。
+ * 槽网格的纯几何部分。
+ *
+ * 只算槽宽、槽数、每槽的起止时间与空槽原因，不物化任何槽对象：
+ * 超长视频的槽数随时长线性增长，流水线按「图」逐张物化当前 4 个槽即可，
+ * 内存不随片长增长。planSlots 也由它物化，两者不会各算一套。
  */
-export function planSlots({ duration, lastPts, slotsPerSecond = 20, framesPerSheet = 4 }) {
+export function slotLayout({ duration, lastPts = null, slotsPerSecond = 20, framesPerSheet = 4 }) {
   const slotSec = 1 / slotsPerSecond;
   const byDuration = Math.ceil(duration / slotSec);
   // 最后一帧所在槽的序号 + 1 即为所需槽数；用与分槽一致的函数避免边界差一。
@@ -23,12 +25,34 @@ export function planSlots({ duration, lastPts, slotsPerSecond = 20, framesPerShe
   total = Math.ceil(total / framesPerSheet) * framesPerSheet;
 
   const tailEdge = Number.isFinite(lastPts) ? lastPts + slotSec : duration;
-  const slots = Array.from({ length: total }, (_, i) => ({
+
+  return {
+    slotSec,
+    total,
+    sheets: total / framesPerSheet,
+    startOf: (index) => index * slotSec,
+    endOf: (index) => (index + 1) * slotSec,
+    emptyReason: (index) => (index * slotSec > tailEdge ? 'beyond-duration' : 'no-frame'),
+  };
+}
+
+/**
+ * 预先铺好定长槽网格。
+ *
+ * 网格长度恒定且补齐到 framesPerSheet 的整数倍，每个槽永远占一个格子；
+ * 没有源帧落入的槽保留 empty=true，由 compose 画成空帧。
+ * 槽位按时间索引固定，绝不因为缺帧而把后面的帧左移压实。
+ *
+ * 流水线不再调用它（超长视频会一次性建出全部槽对象），保留给需要整表的测试与工具。
+ */
+export function planSlots({ duration, lastPts, slotsPerSecond = 20, framesPerSheet = 4 }) {
+  const layout = slotLayout({ duration, lastPts, slotsPerSecond, framesPerSheet });
+  const slots = Array.from({ length: layout.total }, (_, i) => ({
     slot: i,
-    start: i * slotSec,
-    end: (i + 1) * slotSec,
+    start: layout.startOf(i),
+    end: layout.endOf(i),
     empty: true,
-    reason: i * slotSec > tailEdge ? 'beyond-duration' : 'no-frame',
+    reason: layout.emptyReason(i),
     pts: null,
     frameIndex: null,
     score: null,
@@ -37,5 +61,5 @@ export function planSlots({ duration, lastPts, slotsPerSecond = 20, framesPerShe
     buffer: null,
   }));
 
-  return { slotSec, total, slots, sheets: total / framesPerSheet };
+  return { slotSec: layout.slotSec, total: layout.total, slots, sheets: layout.sheets };
 }

@@ -31,7 +31,8 @@ export async function* decodeFrames({ input, cellWidth, cellHeight, start = 0, e
     windowsHide: true,
   });
 
-  const ptsByIndex = [];
+  // 只缓存「已解析、尚未被消费」的几帧时间戳；消费后即删，超长视频不会堆积。
+  const ptsByIndex = new Map();
   const ptsWaiters = new Map();
   let lineBuf = '';
   let stderrText = '';
@@ -55,8 +56,8 @@ export async function* decodeFrames({ input, cellWidth, cellHeight, start = 0, e
       if (match) {
         const index = Number(match[1]);
         const pts = Number(match[2]);
-        ptsByIndex[index] = pts;
-        resolveWaiter(index, pts);
+        if (ptsWaiters.has(index)) resolveWaiter(index, pts);
+        else ptsByIndex.set(index, pts);
       }
     }
   });
@@ -67,8 +68,17 @@ export async function* decodeFrames({ input, cellWidth, cellHeight, start = 0, e
   }).then((result) => {
     // 进程结束时还没等到 showinfo 行的帧按缺失处理，避免等待永久挂起。
     for (const index of [...ptsWaiters.keys()]) resolveWaiter(index, null);
+    ptsByIndex.clear();
     return result;
   });
+
+  /** 取走已缓存的时间戳（消费即删）；没有则返回 undefined。 */
+  const takePts = (index) => {
+    const pts = ptsByIndex.get(index);
+    if (pts === undefined) return undefined;
+    ptsByIndex.delete(index);
+    return pts;
+  };
 
   /**
    * 取第 index 帧的时间戳。像素数据与 showinfo 日志走 stdout/stderr 两条管道，
@@ -76,8 +86,9 @@ export async function* decodeFrames({ input, cellWidth, cellHeight, start = 0, e
    * （推算会抹平 VFR 间隔，让帧落进错误的槽）。日志丢失或进程结束则返回 null。
    */
   const waitPts = (index) => new Promise((resolve) => {
-    if (ptsByIndex[index] !== undefined) {
-      resolve(ptsByIndex[index]);
+    const cached = takePts(index);
+    if (cached !== undefined) {
+      resolve(cached);
       return;
     }
     const timer = setTimeout(() => resolveWaiter(index, null), PTS_WAIT_TIMEOUT_MS);
@@ -106,9 +117,8 @@ export async function* decodeFrames({ input, cellWidth, cellHeight, start = 0, e
         if (filled < frameSize) continue;
 
         const current = index++;
-        const pts = ptsByIndex[current] !== undefined
-          ? ptsByIndex[current]
-          : await waitPts(current);
+        const cached = takePts(current);
+        const pts = cached !== undefined ? cached : await waitPts(current);
         yield { index: current, buffer: frame, pts };
         frame = Buffer.allocUnsafe(frameSize);
         filled = 0;

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { slotIndexOf, planSlots } from '../src/slots.js';
+import { slotIndexOf, planSlots, slotLayout } from '../src/slots.js';
 
 test('50ms 槽边界按半开区间归属', () => {
   assert.equal(slotIndexOf(0, 20), 0);
@@ -45,6 +45,27 @@ test('片尾不足 4 槽时补齐成完整一张图', () => {
   assert.equal(plan.sheets, 2);
   assert.equal(plan.slots.length % 4, 0);
   assert.equal(plan.slots[7].reason, 'beyond-duration');
+});
+
+test('slotLayout 与 planSlots 的槽几何一致', () => {
+  const cases = [
+    { duration: 1, lastPts: 0.9, slotsPerSecond: 20, framesPerSheet: 4 },
+    { duration: 0.21, lastPts: 0.2, slotsPerSecond: 20, framesPerSheet: 4 },
+    { duration: 16.333333, lastPts: null, slotsPerSecond: 20, framesPerSheet: 4 },
+    { duration: 0, lastPts: null, slotsPerSecond: 10, framesPerSheet: 2 },
+  ];
+  for (const options of cases) {
+    const layout = slotLayout(options);
+    const plan = planSlots(options);
+    assert.equal(layout.total, plan.total);
+    assert.equal(layout.sheets, plan.sheets);
+    assert.equal(layout.slotSec, plan.slotSec);
+    for (const slot of plan.slots) {
+      assert.equal(layout.startOf(slot.slot), slot.start);
+      assert.equal(layout.endOf(slot.slot), slot.end);
+      assert.equal(layout.emptyReason(slot.slot), slot.reason);
+    }
+  }
 });
 
 test('60fps 素材每个槽都有候选帧', () => {
