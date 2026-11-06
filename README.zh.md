@@ -1,11 +1,12 @@
 # video-peak-frames
 
-视频抽帧工具。把视频按固定长度的时间槽切分，每个时间槽取变化量最大的一帧，拼成图片输出。
+视频抽帧工具。把视频按固定长度的时间槽切分，每个时间槽取变化量最大的一帧，拼成图片输出。另有自适应采样模式，可按画面变化量分配帧率。
 
 ## 功能
 
 - 时间槽按帧的真实时间戳归属。槽内没有源帧时输出空帧，空帧占一个格子，其余帧的位置不变
 - 变化量取局部峰值，局部变化与全局变化同等计入
+- 自适应采样：画面变化多的片段多抽帧、变化少的片段少抽帧，帧率限定在上下限之间，每段连续覆盖时间轴
 - 时间范围、每秒槽数、图片格式与质量、排版、每张图的帧数可调
 - 图片内合成时间码，合成位置与文字方向可选
 - 文件名包含视频名、时间区间、图片质量与排版
@@ -30,6 +31,17 @@
 
 每槽内变化量最大的帧被选中。变化量不超过 `--noise-floor` 时改取槽内靠中间的一帧。
 `--noise-floor` 默认 0，即始终取变化量最大的帧。
+
+### 自适应采样
+
+开启 `--adaptive` 后，采样频率不再固定。以 `--max-fps` 为基准网格（槽宽为其倒数），按 `--adapt-window` 秒（默认 1 秒）划分窗口。
+
+每个窗口中，每个基准槽保留候选帧里变化量最大的一帧。窗口活动度取这些槽变化量的平均值（只看有帧的槽）。
+由活动度线性映射出目标帧率：活动度不高于 `--adapt-low` 时取 `--min-fps`，不低于 `--adapt-high` 时取 `--max-fps`，中间按比例过渡。
+目标帧数等于目标帧率乘窗口时长，夹到上下限；同时不超过窗口内有帧的基准槽数，也不超过源帧率。
+
+窗口按目标帧数切分为连续区段，每段取段内活动度最高的候选帧，区段首尾相接覆盖整个窗口。每段对应一个格子，起止时间可变；段内确实没有源帧时输出空帧。
+因此每张图覆盖的时间跨度会随画面变化而变化，每帧也带明确时长，可按帧时长重建时间轴。
 
 ### 拼图
 
@@ -57,6 +69,8 @@ npm run install:ffmpeg
 node bin/cli.mjs input.mp4 -o out
 node bin/cli.mjs input.mp4 -o out --start 5 --end 10 --slots-per-second 10
 node bin/cli.mjs input.mp4 -o out --layout 2x1 --frames-per-sheet 2 --stamp-pos 右下 --stamp-dir 竖向
+node bin/cli.mjs input.mp4 -o out --adaptive
+node bin/cli.mjs input.mp4 -o out --adaptive --min-fps 1 --max-fps 30 --adapt-low 0.5 --adapt-high 20
 ```
 
 `--dry-run` 只写 `manifest.json`。`--help` 输出全部参数。
@@ -69,7 +83,13 @@ node bin/cli.mjs input.mp4 -o out --layout 2x1 --frames-per-sheet 2 --stamp-pos 
 | `-o, --out` | `./frames` | 输出目录 |
 | `--start` | `0` | 截取起点，秒 |
 | `--end` | 片尾 | 截取终点，秒 |
-| `--slots-per-second` | `20` | 每秒槽数，即采样频率 |
+| `--slots-per-second` | `20` | 每秒槽数，即采样频率。自适应模式下作为 `--max-fps` 的默认值 |
+| `--adaptive` | 关 | 开启自适应采样 |
+| `--min-fps` | `2` | 自适应模式的每秒抽帧下限 |
+| `--max-fps` | `--slots-per-second` | 自适应模式的每秒抽帧上限，同时决定基准网格密度 |
+| `--adapt-window` | `1` | 活动度统计窗口，秒，范围 0-10 |
+| `--adapt-low` | `1` | 活动度不高于该值时使用下限帧率 |
+| `--adapt-high` | `40` | 活动度不低于该值时使用上限帧率 |
 | `--format` | `jpg` | `jpg` / `png` / `webp`；`jpeg` 等价于 `jpg` |
 | `--quality` | `90` | 图片质量，1-100。png 为无损格式，此值映射为压缩级别 |
 | `--layout` | `2x2` | 排版，列 x 行 |
@@ -100,6 +120,8 @@ clip__t5.00s-5.40s__q90__2x2__00001.jpg
 ```
 
 `manifest.json` 含 `range`、`params`、`source`、`summary`、`sheets` 五段。`sheets` 每项对应一张图片，记录时间区间与逐格的槽号、时间戳、得分、候选帧数、选中依据。
+
+自适应模式下文件名格式不变，但每张图的时间跨度随密度变化；`params.mode` 为 `adaptive`，并记录 `minFps`、`maxFps`、`adaptWindow`、`adaptLow`、`adaptHigh`。每格额外记录 `end`、`duration`、`window` 与 `windowFps`，`summary` 增加 `windows` 与 `avgFps`。
 
 `sheets` 在运行过程中逐张图写入磁盘，不在内存里累积整份记录；槽表也按图物化。因此超长视频的内存占用不随片长增长。
 

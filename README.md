@@ -1,11 +1,12 @@
 # video-peak-frames
 
-Video frame extraction tool. It splits a video into fixed-length time slots, picks the frame with the highest change in each slot, and composes the frames into images.
+Video frame extraction tool. It splits a video into fixed-length time slots, picks the frame with the highest change in each slot, and composes the frames into images. An adaptive sampling mode can also distribute the frame rate according to how much the picture changes.
 
 ## Features
 
 - Frames are assigned to slots by their real timestamps. A slot without a source frame produces an empty frame, which occupies one cell and leaves the position of other frames unchanged.
 - Change is measured as a local peak, so local change and global change count equally.
+- Adaptive sampling: busy segments get more frames and quiet segments get fewer, with a frame rate clamped between a lower and an upper bound; segments tile the timeline.
 - Time range, slots per second, image format and quality, layout, and frames per image are configurable.
 - A timecode can be composited into the images, with selectable position and text direction.
 - File names carry the video name, time range, image quality, and layout.
@@ -30,6 +31,17 @@ The global mean absolute difference is written to `manifest.json` and is not use
 
 The frame with the highest change in a slot is selected. When the change does not exceed `--noise-floor`, a frame near the middle of the slot is selected instead.
 `--noise-floor` defaults to 0, which selects the highest change in every case.
+
+### Adaptive sampling
+
+With `--adaptive` the sampling rate is no longer fixed. `--max-fps` defines the base grid (its reciprocal is the slot width), and the timeline is divided into windows of `--adapt-window` seconds, one second by default.
+
+Inside a window, every base slot keeps the highest-change candidate frame. The window activity is the mean change of those slots, counting only slots that have a frame.
+A target frame rate is mapped linearly from the activity: at or below `--adapt-low` it is `--min-fps`, at or above `--adapt-high` it is `--max-fps`, with a proportional transition in between.
+The target frame count is the target rate times the window duration, clamped to both bounds; it never exceeds the number of occupied base slots nor the source frame rate.
+
+The window is split into that many consecutive segments, each taking the highest-change candidate frame inside it; segments tile the whole window. Every segment occupies one cell and may have a different duration. A segment without any source frame produces an empty frame.
+A sheet therefore covers a time span that depends on the amount of change, and every frame carries a duration, so the timeline can be reconstructed from the frames.
 
 ### Composition
 
@@ -57,6 +69,8 @@ npm run install:ffmpeg
 node bin/cli.mjs input.mp4 -o out
 node bin/cli.mjs input.mp4 -o out --start 5 --end 10 --slots-per-second 10
 node bin/cli.mjs input.mp4 -o out --layout 2x1 --frames-per-sheet 2 --stamp-pos br --stamp-dir v-tb
+node bin/cli.mjs input.mp4 -o out --adaptive
+node bin/cli.mjs input.mp4 -o out --adaptive --min-fps 1 --max-fps 30 --adapt-low 0.5 --adapt-high 20
 ```
 
 `--dry-run` writes `manifest.json` only. `--help` lists all options.
@@ -69,7 +83,13 @@ node bin/cli.mjs input.mp4 -o out --layout 2x1 --frames-per-sheet 2 --stamp-pos 
 | `-o, --out` | `./frames` | Output directory |
 | `--start` | `0` | Range start in seconds |
 | `--end` | end of video | Range end in seconds |
-| `--slots-per-second` | `20` | Slots per second, the sampling rate |
+| `--slots-per-second` | `20` | Slots per second, the sampling rate. Used as the default of `--max-fps` in adaptive mode |
+| `--adaptive` | off | Enable adaptive sampling |
+| `--min-fps` | `2` | Lower bound of the adaptive frame rate |
+| `--max-fps` | `--slots-per-second` | Upper bound of the adaptive frame rate, which also sets the base grid density |
+| `--adapt-window` | `1` | Activity window in seconds, 0-10 |
+| `--adapt-low` | `1` | Activity at or below this value uses the lower rate |
+| `--adapt-high` | `40` | Activity at or above this value uses the upper rate |
 | `--format` | `jpg` | `jpg` / `png` / `webp`; `jpeg` is an alias of `jpg` |
 | `--quality` | `90` | Image quality, 1-100. png is lossless; the value maps to the compression level |
 | `--layout` | `2x2` | Layout as columns x rows |
@@ -100,6 +120,8 @@ clip__t5.00s-5.40s__q90__2x2__00001.jpg
 ```
 
 `manifest.json` contains `range`, `params`, `source`, `summary`, and `sheets`. Each entry of `sheets` corresponds to one image and records its time range and, per cell, the slot number, timestamp, score, candidate count, and selection basis.
+
+In adaptive mode the file name format is unchanged, but the time span of each image varies with the density; `params.mode` is `adaptive` and records `minFps`, `maxFps`, `adaptWindow`, `adaptLow`, and `adaptHigh`. Every cell additionally records `end`, `duration`, `window`, and `windowFps`, and `summary` gains `windows` and `avgFps`.
 
 Entries of `sheets` are appended to disk image by image instead of being accumulated in memory, and the slot table is materialized per image. Memory use therefore does not grow with the length of the input.
 
