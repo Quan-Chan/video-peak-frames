@@ -10,6 +10,7 @@ import { sanitizeVideoName, buildFileName } from './naming.js';
 import { resolveCommonOptions } from './prepare.js';
 import { ManifestSpool, readSheets } from './manifest.js';
 import { runAdaptive } from './adaptive.js';
+import { runBudget } from './budget.js';
 
 export { buildFileName } from './naming.js';
 
@@ -193,6 +194,7 @@ class SheetWriter {
 }
 
 export async function run(options) {
+  if (options.budget) return runBudget(options);
   if (options.adaptive) return runAdaptive(options);
 
   const {

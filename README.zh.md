@@ -1,12 +1,13 @@
 # video-peak-frames
 
-视频抽帧工具。把视频按固定长度的时间槽切分，每个时间槽取变化量最大的一帧，拼成图片输出。另有自适应采样模式，可按画面变化量分配帧率。
+视频抽帧工具。把视频按固定长度的时间槽切分，每个时间槽取变化量最大的一帧，拼成图片输出。另有两种按画面变化分配帧率的采样模式：自适应采样与固定预算采样。
 
 ## 功能
 
 - 时间槽按帧的真实时间戳归属。槽内没有源帧时输出空帧，空帧占一个格子，其余帧的位置不变
 - 变化量取局部峰值，局部变化与全局变化同等计入
 - 自适应采样：画面变化多的片段多抽帧、变化少的片段少抽帧，帧率限定在上下限之间，每段连续覆盖时间轴
+- 固定预算采样：给定平均帧率预算，先完整扫描再按变化幅度做全局最优分配，总帧数固定、图片数量确定
 - 时间范围、每秒槽数、图片格式与质量、排版、每张图的帧数可调
 - 图片内合成时间码，合成位置与文字方向可选
 - 文件名包含视频名、时间区间、图片质量与排版
@@ -43,6 +44,18 @@
 窗口按目标帧数切分为连续区段，每段取段内活动度最高的候选帧，区段首尾相接覆盖整个窗口。每段对应一个格子，起止时间可变；段内确实没有源帧时输出空帧。
 因此每张图覆盖的时间跨度会随画面变化而变化，每帧也带明确时长，可按帧时长重建时间轴。
 
+### 固定预算采样
+
+开启 `--budget` 后，总帧数由预算决定：`round(--budget-fps × 区间时长)`。默认预算 15 fps；每个窗口（`--adapt-window`，默认 1 秒）帧数下限 1、上限 30（`--min-fps` / `--max-fps`）。
+
+预算模式需要先完整扫描一遍：以 `--max-fps` 为基准网格（槽宽为其倒数），每个基准槽保留候选帧里变化量最大的一帧并记录得分，这一遍不保留像素。
+
+随后在「每窗口帧数有上下限、总帧数固定」的约束下做全局最优分配。每个窗口的候选帧按得分降序排列，多拿一帧的边际收益递减；先给每个窗口放满下限，再用最大堆每次取全局最大的下一帧边际收益，直到总帧数用完。该贪心使选中帧的得分总和最大。
+
+选中的槽按时间排序，相邻两帧之间形成一个连续区段：第一段从区间起点开始，最后一段到区间终点。每段对应一个格子，起止时间可变，最后一张图可能不满。
+
+第二遍解码按第一遍记录的帧号抓取选中帧并拼图，因此预算模式会解码两遍；`--dry-run` 只跑第一遍并写 `manifest.json`。
+
 ### 拼图
 
 选中的帧缩放到 `--cell` 指定的单格尺寸，宽高比不变，不足处补边。
@@ -71,6 +84,8 @@ node bin/cli.mjs input.mp4 -o out --start 5 --end 10 --slots-per-second 10
 node bin/cli.mjs input.mp4 -o out --layout 2x1 --frames-per-sheet 2 --stamp-pos 右下 --stamp-dir 竖向
 node bin/cli.mjs input.mp4 -o out --adaptive
 node bin/cli.mjs input.mp4 -o out --adaptive --min-fps 1 --max-fps 30 --adapt-low 0.5 --adapt-high 20
+node bin/cli.mjs input.mp4 -o out --budget
+node bin/cli.mjs input.mp4 -o out --budget --budget-fps 10 --max-fps 30
 ```
 
 `--dry-run` 只写 `manifest.json`。`--help` 输出全部参数。
@@ -83,11 +98,13 @@ node bin/cli.mjs input.mp4 -o out --adaptive --min-fps 1 --max-fps 30 --adapt-lo
 | `-o, --out` | `./frames` | 输出目录 |
 | `--start` | `0` | 截取起点，秒 |
 | `--end` | 片尾 | 截取终点，秒 |
-| `--slots-per-second` | `20` | 每秒槽数，即采样频率。自适应模式下作为 `--max-fps` 的默认值 |
+| `--slots-per-second` | `20` | 每秒槽数，即采样频率。自适应模式下作为 `--max-fps` 的默认值；预算模式不使用该参数 |
 | `--adaptive` | 关 | 开启自适应采样 |
-| `--min-fps` | `2` | 自适应模式的每秒抽帧下限 |
-| `--max-fps` | `--slots-per-second` | 自适应模式的每秒抽帧上限，同时决定基准网格密度 |
-| `--adapt-window` | `1` | 活动度统计窗口，秒，范围 0-10 |
+| `--budget` | 关 | 开启固定预算采样 |
+| `--budget-fps` | `15` | 预算平均帧率，1-240，需在 `--min-fps` 与 `--max-fps` 之间 |
+| `--min-fps` | 自适应 `2` / 预算 `1` | 每秒抽帧下限 |
+| `--max-fps` | 自适应 `--slots-per-second` / 预算 `30` | 每秒抽帧上限，同时决定基准网格密度 |
+| `--adapt-window` | `1` | 统计窗口，秒，范围 0-10 |
 | `--adapt-low` | `1` | 活动度不高于该值时使用下限帧率 |
 | `--adapt-high` | `40` | 活动度不低于该值时使用上限帧率 |
 | `--format` | `jpg` | `jpg` / `png` / `webp`；`jpeg` 等价于 `jpg` |
@@ -121,7 +138,7 @@ clip__t5.00s-5.40s__q90__2x2__00001.jpg
 
 `manifest.json` 含 `range`、`params`、`source`、`summary`、`sheets` 五段。`sheets` 每项对应一张图片，记录时间区间与逐格的槽号、时间戳、得分、候选帧数、选中依据。
 
-自适应模式下文件名格式不变，但每张图的时间跨度随密度变化；`params.mode` 为 `adaptive`，并记录 `minFps`、`maxFps`、`adaptWindow`、`adaptLow`、`adaptHigh`。每格额外记录 `end`、`duration`、`window` 与 `windowFps`，`summary` 增加 `windows` 与 `avgFps`。
+自适应与预算模式下文件名格式不变，但每张图的时间跨度随密度变化。自适应模式 `params.mode` 为 `adaptive`，记录 `minFps`、`maxFps`、`adaptWindow`、`adaptLow`、`adaptHigh`；预算模式 `params.mode` 为 `budget`，记录 `budgetFps`、`budgetFrames`、`minFps`、`maxFps`、`adaptWindow`、`allocator`。两种模式的每格都额外记录 `end`、`duration`、`window` 与 `windowFps`，`summary` 增加 `windows` 与 `avgFps`。
 
 `sheets` 在运行过程中逐张图写入磁盘，不在内存里累积整份记录；槽表也按图物化。因此超长视频的内存占用不随片长增长。
 

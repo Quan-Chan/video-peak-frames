@@ -1,6 +1,6 @@
 {
   "name": "video-peak-frames",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "按 50ms 时间槽抽取变化最大的帧，每 4 帧拼成一张图片",

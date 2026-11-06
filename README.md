@@ -1,12 +1,13 @@
 # video-peak-frames
 
-Video frame extraction tool. It splits a video into fixed-length time slots, picks the frame with the highest change in each slot, and composes the frames into images. An adaptive sampling mode can also distribute the frame rate according to how much the picture changes.
+Video frame extraction tool. It splits a video into fixed-length time slots, picks the frame with the highest change in each slot, and composes the frames into images. Two further modes distribute the frame rate according to how much the picture changes: adaptive sampling and fixed-budget sampling.
 
 ## Features
 
 - Frames are assigned to slots by their real timestamps. A slot without a source frame produces an empty frame, which occupies one cell and leaves the position of other frames unchanged.
 - Change is measured as a local peak, so local change and global change count equally.
 - Adaptive sampling: busy segments get more frames and quiet segments get fewer, with a frame rate clamped between a lower and an upper bound; segments tile the timeline.
+- Fixed-budget sampling: given an average frame rate budget, a full scan is followed by a globally optimal allocation by change, so the total frame count is fixed and the image count is determined.
 - Time range, slots per second, image format and quality, layout, and frames per image are configurable.
 - A timecode can be composited into the images, with selectable position and text direction.
 - File names carry the video name, time range, image quality, and layout.
@@ -43,6 +44,18 @@ The target frame count is the target rate times the window duration, clamped to 
 The window is split into that many consecutive segments, each taking the highest-change candidate frame inside it; segments tile the whole window. Every segment occupies one cell and may have a different duration. A segment without any source frame produces an empty frame.
 A sheet therefore covers a time span that depends on the amount of change, and every frame carries a duration, so the timeline can be reconstructed from the frames.
 
+### Fixed-budget sampling
+
+With `--budget` the total frame count is fixed by the budget: `round(--budget-fps × range duration)`. The default budget is 15 fps; each window (`--adapt-window`, one second by default) is clamped between 1 and 30 frames (`--min-fps` / `--max-fps`).
+
+Budget mode first scans the whole range once: `--max-fps` defines the base grid (its reciprocal is the slot width), every base slot keeps the highest-change candidate frame, and only its score is retained; no pixels are kept in this pass.
+
+The frame budget is then allocated globally under the constraint that every window stays within its bounds and the total is exact. Candidate frames of a window are sorted by score, so the marginal gain of one more frame decreases; every window first receives its lower bound, then a max-heap repeatedly grants the next frame to the window with the largest global marginal gain until the budget is exhausted. This greedy allocation maximizes the total score of the selected frames.
+
+Selected slots are sorted by time and consecutive frames form the segments: the first segment starts at the range start and the last one ends at the range end. Every segment occupies one cell and may have a different duration; the last sheet may be partially filled.
+
+A second decode pass fetches the selected frame indices recorded by the first pass and composes the sheets, so budget mode decodes twice; `--dry-run` runs only the first pass and writes `manifest.json`.
+
 ### Composition
 
 Selected frames are scaled to the cell size given by `--cell`, keeping aspect ratio and padding the rest.
@@ -71,6 +84,8 @@ node bin/cli.mjs input.mp4 -o out --start 5 --end 10 --slots-per-second 10
 node bin/cli.mjs input.mp4 -o out --layout 2x1 --frames-per-sheet 2 --stamp-pos br --stamp-dir v-tb
 node bin/cli.mjs input.mp4 -o out --adaptive
 node bin/cli.mjs input.mp4 -o out --adaptive --min-fps 1 --max-fps 30 --adapt-low 0.5 --adapt-high 20
+node bin/cli.mjs input.mp4 -o out --budget
+node bin/cli.mjs input.mp4 -o out --budget --budget-fps 10 --max-fps 30
 ```
 
 `--dry-run` writes `manifest.json` only. `--help` lists all options.
@@ -83,11 +98,13 @@ node bin/cli.mjs input.mp4 -o out --adaptive --min-fps 1 --max-fps 30 --adapt-lo
 | `-o, --out` | `./frames` | Output directory |
 | `--start` | `0` | Range start in seconds |
 | `--end` | end of video | Range end in seconds |
-| `--slots-per-second` | `20` | Slots per second, the sampling rate. Used as the default of `--max-fps` in adaptive mode |
+| `--slots-per-second` | `20` | Slots per second, the sampling rate. Used as the default of `--max-fps` in adaptive mode; unused in budget mode |
 | `--adaptive` | off | Enable adaptive sampling |
-| `--min-fps` | `2` | Lower bound of the adaptive frame rate |
-| `--max-fps` | `--slots-per-second` | Upper bound of the adaptive frame rate, which also sets the base grid density |
-| `--adapt-window` | `1` | Activity window in seconds, 0-10 |
+| `--budget` | off | Enable fixed-budget sampling |
+| `--budget-fps` | `15` | Budget average frame rate, 1-240, between `--min-fps` and `--max-fps` |
+| `--min-fps` | adaptive `2` / budget `1` | Lower bound of the frame rate |
+| `--max-fps` | adaptive `--slots-per-second` / budget `30` | Upper bound of the frame rate, which also sets the base grid density |
+| `--adapt-window` | `1` | Statistics window in seconds, 0-10 |
 | `--adapt-low` | `1` | Activity at or below this value uses the lower rate |
 | `--adapt-high` | `40` | Activity at or above this value uses the upper rate |
 | `--format` | `jpg` | `jpg` / `png` / `webp`; `jpeg` is an alias of `jpg` |
@@ -121,7 +138,7 @@ clip__t5.00s-5.40s__q90__2x2__00001.jpg
 
 `manifest.json` contains `range`, `params`, `source`, `summary`, and `sheets`. Each entry of `sheets` corresponds to one image and records its time range and, per cell, the slot number, timestamp, score, candidate count, and selection basis.
 
-In adaptive mode the file name format is unchanged, but the time span of each image varies with the density; `params.mode` is `adaptive` and records `minFps`, `maxFps`, `adaptWindow`, `adaptLow`, and `adaptHigh`. Every cell additionally records `end`, `duration`, `window`, and `windowFps`, and `summary` gains `windows` and `avgFps`.
+In adaptive and budget modes the file name format is unchanged, but the time span of each image varies with the density. Adaptive mode sets `params.mode` to `adaptive` and records `minFps`, `maxFps`, `adaptWindow`, `adaptLow`, and `adaptHigh`; budget mode sets `params.mode` to `budget` and records `budgetFps`, `budgetFrames`, `minFps`, `maxFps`, `adaptWindow`, and `allocator`. In both modes every cell additionally records `end`, `duration`, `window`, and `windowFps`, and `summary` gains `windows` and `avgFps`.
 
 Entries of `sheets` are appended to disk image by image instead of being accumulated in memory, and the slot table is materialized per image. Memory use therefore does not grow with the length of the input.
 

@@ -9,12 +9,13 @@ const HELP = `视频抽帧工具 vpf
 
 把视频按时间槽抽帧：每槽取「变化最大」的一帧，再拼成一张图片。
 槽内没有源帧时空帧占位，槽位固定、后续帧绝不左移。
+支持固定网格、自适应采样与固定预算采样三种方式。
 
 用法：
   vpf <input.mp4> -o ./frames [选项]
   vpf -i input.mp4 --start 5 --end 10 --slots-per-second 10
 
-一、预算（取多少、多密、什么格式）
+一、基础参数（取多少、多密、什么格式）
   -i, --input <file>        输入视频
   -o, --out <dir>           输出目录，默认 ./frames
       --start <sec>         截取起点（秒），默认 0
@@ -59,6 +60,17 @@ const HELP = `视频抽帧工具 vpf
       --adapt-high <n>      活动度高于该值时用上限帧率，默认 40
                             自适应模式下每格是一段连续区段（起止时间可变），
                             最后一张图可能不满；文件名格式不变
+
+五、预算采样（可选）
+      --budget              固定平均帧率预算：总帧数 = 预算 × 区间时长，
+                            在每窗口帧数上下限内做全局最优分配，把预算留给变化最大的片段
+      --budget-fps <n>      预算平均帧率，默认 15；需在 --min-fps 与 --max-fps 之间
+      --min-fps <n>         预算模式下每窗口下限帧率，默认 1
+      --max-fps <n>         预算模式下每窗口上限帧率，默认 30；同时决定基准网格密度
+      --adapt-window <sec>  统计窗口，默认 1
+                            预算模式需要完整扫描一遍再全局分配，因此会解码两遍；
+                            每格是一段连续区段，最后一张图可能不满
+                            --budget 与 --adaptive 不能同时使用
 
 输出文件名统一为：
   <视频名>__t<起s>-<止s>__q<质量>__<排版>__<序号>.<扩展名>
@@ -128,6 +140,8 @@ async function main() {
       gap: { type: 'string', default: '4' },
       'slots-per-second': { type: 'string', default: '20' },
       adaptive: { type: 'boolean', default: false },
+      budget: { type: 'boolean', default: false },
+      'budget-fps': { type: 'string', default: '15' },
       'min-fps': { type: 'string' },
       'max-fps': { type: 'string' },
       'adapt-window': { type: 'string', default: '1' },
@@ -173,22 +187,40 @@ async function main() {
 
   const slotsPerSecond = intOf(values['slots-per-second'], '--slots-per-second', 1, 240);
   const adaptive = Boolean(values.adaptive);
+  const budget = Boolean(values.budget);
+  if (adaptive && budget) fail('--adaptive 与 --budget 不能同时使用');
+
+  /** 读取并校验 --adapt-window；自适应与预算模式共用。 */
+  const readAdaptWindow = () => {
+    const seconds = floatOf(values['adapt-window'], '--adapt-window');
+    if (seconds <= 0 || seconds > 10) fail('--adapt-window 应为 0-10 之间的正数');
+    return seconds;
+  };
+
   let minFps = 2;
   let maxFps = slotsPerSecond;
   let adaptWindow = 1;
   let adaptLow = 1;
   let adaptHigh = 40;
+  let budgetFps = 15;
   if (adaptive) {
     minFps = intOf(values['min-fps'] ?? '2', '--min-fps', 1, 240);
     maxFps = values['max-fps'] == null
       ? slotsPerSecond
       : intOf(values['max-fps'], '--max-fps', 1, 240);
     if (minFps > maxFps) fail('--min-fps 不能大于 --max-fps');
-    adaptWindow = floatOf(values['adapt-window'], '--adapt-window');
-    if (adaptWindow <= 0 || adaptWindow > 10) fail('--adapt-window 应为 0-10 之间的正数');
+    adaptWindow = readAdaptWindow();
     adaptLow = floatOf(values['adapt-low'], '--adapt-low');
     adaptHigh = floatOf(values['adapt-high'], '--adapt-high');
     if (adaptHigh <= adaptLow) fail('--adapt-low 必须小于 --adapt-high');
+  } else if (budget) {
+    minFps = intOf(values['min-fps'] ?? '1', '--min-fps', 1, 240);
+    maxFps = intOf(values['max-fps'] ?? '30', '--max-fps', 1, 240);
+    if (minFps > maxFps) fail('--min-fps 不能大于 --max-fps');
+    budgetFps = intOf(values['budget-fps'], '--budget-fps', 1, 240);
+    if (budgetFps < minFps) fail('--budget-fps 不能小于 --min-fps');
+    if (budgetFps > maxFps) fail('--budget-fps 不能大于 --max-fps');
+    adaptWindow = readAdaptWindow();
   }
 
   const options = {
@@ -201,7 +233,7 @@ async function main() {
     quality: intOf(values.quality, '--quality', 1, 100),
     gap: intOf(values.gap, '--gap', 0, 64),
     slotsPerSecond,
-    adaptive, minFps, maxFps, adaptWindow, adaptLow, adaptHigh,
+    adaptive, budget, budgetFps, minFps, maxFps, adaptWindow, adaptLow, adaptHigh,
     stampPos: mapEnum(values['stamp-pos'], POS_ALIAS, '--stamp-pos'),
     stampDir: mapEnum(values['stamp-dir'], DIR_ALIAS, '--stamp-dir'),
     noiseFloor: floatOf(values['noise-floor'], '--noise-floor'),
@@ -217,7 +249,13 @@ async function main() {
   const manifest = await run(options);
   if (!options.quiet) {
     const s = manifest.summary;
-    if (options.adaptive) {
+    if (options.budget) {
+      console.log(
+        `完成：${s.sheets} 张图 / ${s.slots} 个区段，平均 ${s.avgFps} fps（预算 ${options.budgetFps} fps），` +
+        `有效帧 ${s.filledSlots}，空帧 ${s.emptySlots}，` +
+        `输出目录 ${options.outDir}`
+      );
+    } else if (options.adaptive) {
       console.log(
         `完成：${s.sheets} 张图 / ${s.slots} 个区段，平均 ${s.avgFps} fps，` +
         `有效帧 ${s.filledSlots}，空帧 ${s.emptySlots}，` +

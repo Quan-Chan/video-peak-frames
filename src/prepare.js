@@ -8,7 +8,7 @@ export function extensionOf(format) {
 }
 
 /**
- * 固定模式与自适应模式共用的参数校验。
+ * 固定模式、自适应模式与预算模式共用的参数校验。
  * 返回后续流程需要的规范化结果；报错文案与旧版保持一致。
  */
 export function resolveCommonOptions(options) {
