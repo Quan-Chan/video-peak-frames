@@ -9,6 +9,7 @@ Video frame extraction tool. It splits a video into fixed-length time slots, pic
 - Time range, slots per second, image format and quality, layout, and frames per image are configurable.
 - A timecode can be composited into the images, with selectable position and text direction.
 - File names carry the video name, time range, image quality, and layout.
+- Each sheet is composed as soon as its frames are known, and frame buffers are released immediately, so memory use does not grow with video length.
 - `manifest.json` records the timestamp, score, candidate count, and selection basis of every slot.
 
 ## Algorithm
@@ -69,7 +70,7 @@ node bin/cli.mjs input.mp4 -o out --layout 2x1 --frames-per-sheet 2 --stamp-pos 
 | `--start` | `0` | Range start in seconds |
 | `--end` | end of video | Range end in seconds |
 | `--slots-per-second` | `20` | Slots per second, the sampling rate |
-| `--format` | `jpg` | `jpg` / `png` / `webp` |
+| `--format` | `jpg` | `jpg` / `png` / `webp`; `jpeg` is an alias of `jpg` |
 | `--quality` | `90` | Image quality, 1-100. png is lossless; the value maps to the compression level |
 | `--layout` | `2x2` | Layout as columns x rows |
 | `--frames-per-sheet` | cells of layout | Frames per image. Errors out when it exceeds the cell count |

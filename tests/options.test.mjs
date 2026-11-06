@@ -2,12 +2,16 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm, readdir } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { mkdtemp, rm, readdir, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import sharp from 'sharp';
 import { ffmpegPath, ensureBinaries } from '../src/probe.js';
 import { run, buildFileName } from '../src/pipeline.js';
 import { parseLayout, stampSvg, STAMP_POS, STAMP_DIR } from '../src/compose.js';
+
+const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
 const exec = promisify(execFile);
 let tmp;
@@ -26,7 +30,8 @@ before(async () => {
 });
 
 after(async () => {
-  if (tmp) await rm(tmp, { recursive: true, force: true });
+  // Windows 上 libvips 可能短暂持有刚读过的图片句柄，删除时重试几次。
+  if (tmp) await rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 const BASE = {
@@ -106,18 +111,68 @@ test('排版格子数不足以容纳每图帧数时明确报错', async () => {
   assert.throws(() => parseLayout('2x3.5'), /排版/);
 });
 
-test('时间码位置与文字方向可配，中文别名可用', async () => {
+test('时间码位置与文字方向可配，中文别名可用，jpeg 归一为 jpg', async () => {
   const outDir = path.join(tmp, 'stamp');
   const result = spawnSync(process.execPath, [
     'bin/cli.mjs', video, '-o', outDir,
     '--start', '0', '--end', '1',
     '--stamp-pos', '右下', '--stamp-dir', '竖向',
     '--layout', '2x2', '--frames-per-sheet', '4',
+    '--format', 'jpeg',
     '--quiet',
   ], { encoding: 'utf8', windowsHide: true });
   assert.equal(result.status, 0, result.stderr);
   const files = await readdir(outDir);
   assert.equal(files.filter((f) => f.endsWith('.jpg')).length, 5);
+  const manifest = JSON.parse(await readFile(path.join(outDir, 'manifest.json'), 'utf8'));
+  assert.equal(manifest.params.format, 'jpg');
+  assert.equal(manifest.version, pkg.version);
+});
+
+test('manifest.version 与 package.json 版本一致', async () => {
+  const manifest = await run({ ...BASE, input: video, outDir: path.join(tmp, 'version') });
+  assert.equal(manifest.version, pkg.version);
+});
+
+test('每图帧数少于格子数：多余格子留深灰底，不参与时间码', async () => {
+  const outDir = path.join(tmp, 'unused');
+  const manifest = await run({
+    ...BASE, input: video, outDir,
+    start: 0, end: 1, framesPerSheet: 2, annotate: false, dryRun: false,
+  });
+  assert.equal(manifest.summary.sheets, 10);
+  assert.equal(manifest.sheets[0].cells.length, 2);
+
+  const files = (await readdir(outDir)).filter((name) => name.endsWith('.jpg'));
+  assert.equal(files.length, 10);
+  const meta = await sharp(path.join(outDir, files[0])).metadata();
+  assert.equal(meta.width, 2 * 160 + 3 * 2);
+  assert.equal(meta.height, 2 * 90 + 3 * 2);
+
+  // 第 3 格（index 2）没有被帧占用，应铺未用格底色 #2A2E38
+  const pixel = await sharp(path.join(outDir, files[0]))
+    .extract({ left: 2 + 160 / 2, top: 2 + 90 + 2 + 90 / 2, width: 1, height: 1 })
+    .raw()
+    .toBuffer();
+  [42, 46, 56].forEach((expected, channel) => {
+    assert.ok(Math.abs(pixel[channel] - expected) < 16, `底色异常：${[...pixel]}`);
+  });
+});
+
+test('png 与 webp 输出走同一套合成路径', async () => {
+  for (const format of ['png', 'webp']) {
+    const outDir = path.join(tmp, format);
+    const manifest = await run({
+      ...BASE, input: video, outDir,
+      start: 0, end: 0.2, format, quality: 80, dryRun: false,
+    });
+    assert.equal(manifest.params.format, format);
+    const files = (await readdir(outDir)).filter((name) => name.endsWith('.' + format));
+    assert.equal(files.length, 1);
+    // 从内存读取：避免 libvips 在 Windows 上继续持有文件句柄，导致临时目录删不掉。
+    const meta = await sharp(await readFile(path.join(outDir, files[0]))).metadata();
+    assert.equal(meta.format, format);
+  }
 });
 
 test('九种位置与四种方向都能生成合成层', () => {

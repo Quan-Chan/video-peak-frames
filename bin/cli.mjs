@@ -3,7 +3,7 @@ import { parseArgs } from 'node:util';
 import path from 'node:path';
 import { run } from '../src/pipeline.js';
 import { ensureBinaries } from '../src/probe.js';
-import { parseLayout, STAMP_POS, STAMP_DIR } from '../src/compose.js';
+import { parseLayout, capacityError } from '../src/compose.js';
 
 const HELP = `视频抽帧工具 vpf
 
@@ -21,7 +21,7 @@ const HELP = `视频抽帧工具 vpf
       --end <sec>           截取终点（秒），默认到片尾
       --slots-per-second n  采样频率：每秒切几槽，默认 20（即 50ms 一槽），
                             可调 10（100ms）甚至 1（1 秒一槽）
-      --format <s>          jpg（默认）/ png / webp
+      --format <s>          jpg（默认，jpeg 等价）/ png / webp
       --quality <1-100>     图片质量，默认 90；png 为无损格式，
                             此值映射为压缩级别（越大文件越大越快）
 
@@ -138,10 +138,11 @@ async function main() {
   if (!input) fail('缺少输入视频，用 vpf <input.mp4> 或 -i <input.mp4> 指定\n\n' + HELP);
 
   const [cellWidth, cellHeight] = parseCell(values.cell);
-  const format = String(values.format).toLowerCase();
-  if (!['jpg', 'jpeg', 'png', 'webp'].includes(format)) {
-    fail(`--format 只能是 jpg / png / webp，收到：${format}`);
+  const rawFormat = String(values.format).toLowerCase();
+  if (!['jpg', 'jpeg', 'png', 'webp'].includes(rawFormat)) {
+    fail(`--format 只能是 jpg / png / webp，收到：${rawFormat}`);
   }
+  const format = rawFormat === 'jpeg' ? 'jpg' : rawFormat;
 
   const layout = String(values.layout).trim();
   const layoutInfo = parseLayout(layout);
@@ -150,10 +151,7 @@ async function main() {
     ? layoutInfo.cells
     : intOf(values['frames-per-sheet'], '--frames-per-sheet', 1, 64);
   if (framesPerSheet > layoutInfo.cells) {
-    fail(
-      `排版 ${layout}（${layoutInfo.cols} 列 × ${layoutInfo.rows} 行）只有 ${layoutInfo.cells} 格，` +
-      `容纳不下 --frames-per-sheet ${framesPerSheet} 张图片，请换更大的排版或降低每图帧数`
-    );
+    fail(capacityError(layout, framesPerSheet, `--frames-per-sheet ${framesPerSheet} 张图片`));
   }
 
   const options = {

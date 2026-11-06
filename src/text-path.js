@@ -37,9 +37,3 @@ export function textToPathData(text, x, y, fontSize) {
 export function measureText(text, fontSize) {
   return loadFont().getAdvanceWidth(String(text), fontSize);
 }
-
-export const FONT_INFO = Object.freeze({
-  family: 'Roboto Mono',
-  license: 'SIL Open Font License 1.1',
-  packaging: '@expo-google-fonts/roboto-mono (MIT)',
-});

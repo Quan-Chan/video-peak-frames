@@ -9,6 +9,7 @@
 - 时间范围、每秒槽数、图片格式与质量、排版、每张图的帧数可调
 - 图片内合成时间码，合成位置与文字方向可选
 - 文件名包含视频名、时间区间、图片质量与排版
+- 每张图在其帧确定后立即合成并释放帧缓冲，内存占用不随视频时长增长
 - 输出 `manifest.json`，记录每个槽的时间戳、得分、候选帧数与选中依据
 
 ## 算法
@@ -69,7 +70,7 @@ node bin/cli.mjs input.mp4 -o out --layout 2x1 --frames-per-sheet 2 --stamp-pos 
 | `--start` | `0` | 截取起点，秒 |
 | `--end` | 片尾 | 截取终点，秒 |
 | `--slots-per-second` | `20` | 每秒槽数，即采样频率 |
-| `--format` | `jpg` | `jpg` / `png` / `webp` |
+| `--format` | `jpg` | `jpg` / `png` / `webp`；`jpeg` 等价于 `jpg` |
 | `--quality` | `90` | 图片质量，1-100。png 为无损格式，此值映射为压缩级别 |
 | `--layout` | `2x2` | 排版，列 x 行 |
 | `--frames-per-sheet` | 排版格子数 | 每张图包含的帧数。超过格子数时报错 |
