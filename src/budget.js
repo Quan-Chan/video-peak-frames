@@ -29,9 +29,9 @@ export const BUDGET_DEFAULTS = Object.freeze({
  *
  * 1. 第一遍解码，按 maxFps 的基准网格记录每个槽「变化最大的一帧」及其得分，
  *    同时统计每个分析窗口的候选槽；这一遍不保留像素，只留数值数组。
- * 2. 把总帧数当作预算，在「每窗口帧数有上下限」的约束下做全局最优分配：
- *    每个窗口的候选帧按得分降序排列，边际收益递减，用最大堆每次取全局最大的
- *    下一帧边际收益，即可得到「选中帧得分总和最大」的解（见 allocateBudget）。
+ * 2. 把总帧数当作预算，在「每窗口帧数有上下限」的约束下按活动度做平滑分配：
+ *    权重取窗口平均活动度的平方根，压缩尖峰片段的影响，再用二分求出全局缩放系数，
+ *    使中等变化的片段不会被尖峰片段挤到下限（见 allocateBudget）。
  * 3. 第二遍解码，按第一遍记录的帧号抓取选中的帧，按区段顺序流式拼图。
  *
  * 第一遍与第二遍的槽/帧对应关系由同一份解码时间戳决定，正常输入下完全一致；
@@ -150,7 +150,7 @@ async function scanSlotRecords({
 
 /**
  * 按分析窗口聚合候选槽，并把每个窗口的候选槽按 peakScore 降序排列。
- * slots 与 scores 一一对应；分配只需要分数，取帧时需要槽号。
+ * slots 与 scores 一一对应；activity 是窗口平均活动度，用于预算分配。
  */
 function buildWindows(records, totalSlots, windowSlots, slotSec, segmentDuration) {
   const windowCount = Math.max(1, Math.ceil(totalSlots / windowSlots));
@@ -173,66 +173,29 @@ function buildWindows(records, totalSlots, windowSlots, slotSec, segmentDuration
     order.sort((a, b) => (window.scores[b] - window.scores[a]) || (window.slots[a] - window.slots[b]));
     window.slots = order.map((index) => window.slots[index]);
     window.scores = order.map((index) => window.scores[index]);
+    window.activity = window.scores.length
+      ? window.scores.reduce((sum, score) => sum + score, 0) / window.scores.length
+      : 0;
   }
   return windows;
 }
 
-/** 二叉小顶堆；compare 返回负值时 a 的优先级更高。用于取全局最大边际收益。 */
-class PriorityQueue {
-  constructor(compare) {
-    this.items = [];
-    this.compare = compare;
-  }
-
-  push(item) {
-    const items = this.items;
-    items.push(item);
-    let index = items.length - 1;
-    while (index > 0) {
-      const parent = (index - 1) >> 1;
-      if (this.compare(items[index], items[parent]) >= 0) break;
-      [items[index], items[parent]] = [items[parent], items[index]];
-      index = parent;
-    }
-  }
-
-  pop() {
-    const items = this.items;
-    if (!items.length) return undefined;
-    const top = items[0];
-    const last = items.pop();
-    if (items.length) {
-      items[0] = last;
-      let index = 0;
-      for (;;) {
-        const left = index * 2 + 1;
-        const right = left + 1;
-        let smallest = index;
-        if (left < items.length && this.compare(items[left], items[smallest]) < 0) smallest = left;
-        if (right < items.length && this.compare(items[right], items[smallest]) < 0) smallest = right;
-        if (smallest === index) break;
-        [items[index], items[smallest]] = [items[smallest], items[index]];
-        index = smallest;
-      }
-    }
-    return top;
-  }
-}
-
 /**
- * 固定总帧数的最优分配。
+ * 固定总帧数的平滑分配。
  *
- * 每个窗口的候选帧已按得分降序排列，所以「多拿一帧」的边际收益单调递减；
- * 先给每个窗口放满下限，再用最大堆每次取全局最大的边际收益，直到总帧数用完。
- * 该贪心对可分离凹目标是最优的：若把一帧从低边际窗口挪到高边际窗口，总得分只增不减。
+ * 权重取窗口平均活动度的平方根：先压缩尖峰片段的影响，再按权重做比例分配，
+ * 让「变化稍大」的窗口也能拿到与变化相称的帧数，而不是被尖峰窗口挤到下限。
+ * 目标等价于最大化 Σ sqrt(activity_i) · log(F_i)，连续最优解满足
+ * F_i = clamp(λ · sqrt(activity_i), L_i, U_i)；对 λ 二分即可得到唯一解。
  *
  * @param {object} options
- * @param {Array<{duration:number, scores:number[]}>} options.windows 每个窗口的候选得分（降序）
+ * @param {Array<{duration:number, activity?:number, scores:number[]}>} options.windows
+ *   每个窗口的候选得分（降序）与平均活动度
  * @param {number} options.totalFrames 预算总帧数（整数）
  * @param {number} options.minFps 每窗口下限帧率
  * @param {number} options.maxFps 每窗口上限帧率
- * @returns {{counts:number[], lower:number[], upper:number[]}}
- *   每个窗口应取的帧数，以及窗口帧数上下限。
+ * @returns {{counts:number[], lower:number[], upper:number[], lambda:number}}
+ *   每个窗口应取的帧数、窗口帧数上下限与求得的缩放系数
  */
 export function allocateBudget({ windows, totalFrames, minFps, maxFps }) {
   if (!Number.isInteger(totalFrames) || totalFrames < 0) {
@@ -273,34 +236,62 @@ export function allocateBudget({ windows, totalFrames, minFps, maxFps }) {
     );
   }
 
-  const counts = lower.slice();
-  const queue = new PriorityQueue((a, b) => {
-    if (a.score !== b.score) return b.score - a.score; // 边际得分高的先分
-    if (a.ratio !== b.ratio) return a.ratio - b.ratio; // 同分时优先补给当前帧率更低的窗口
-    return a.window - b.window; // 再按窗口顺序，保证结果确定
+  // 窗口活动度 -> 分配权重；平方根压缩尖峰，避免少数剧烈变化窗口吃掉全部预算。
+  // 指数 0.5 是平滑程度的核心：越小越照顾中等变化片段，越大越接近按原始活动度比例分配。
+  const ACTIVITY_WEIGHT_EXPONENT = 0.5;
+  const weights = windows.map((window) => {
+    const activity = window.activity ?? (window.scores.length
+      ? window.scores.reduce((sum, score) => sum + score, 0) / window.scores.length
+      : 0);
+    return activity > 0 ? Math.pow(activity, ACTIVITY_WEIGHT_EXPONENT) : 0;
   });
+  // 全片完全静止时权重全为 0，退化为按窗口时长等权分配。
+  const flat = weights.every((weight) => weight === 0);
+  const effectiveWeights = flat
+    ? windows.map((window) => (window.duration > 0 ? 1 : 0))
+    : weights;
 
-  /** 把窗口「下一帧」的边际收益放进堆（已经达到上限的窗口不再参与）。 */
-  const pushNext = (index) => {
-    if (counts[index] >= upper[index]) return;
-    queue.push({
-      window: index,
-      score: windows[index].scores[counts[index]],
-      ratio: counts[index] / windows[index].duration,
-    });
-  };
-  for (let index = 0; index < windows.length; index++) pushNext(index);
+  /** λ 对应的实数配额总和；λ 增大时总和单调不减。 */
+  const quotaAt = (lambda) => windows.reduce((sum, window, index) => (
+    sum + Math.min(upper[index], Math.max(lower[index], lambda * effectiveWeights[index]))
+  ), 0);
 
-  let remaining = totalFrames - lowerTotal;
-  while (remaining > 0) {
-    const item = queue.pop();
-    if (!item) throw new Error('预算分配失败：剩余帧数无法分配');
-    counts[item.window]++;
-    remaining--;
-    pushNext(item.window);
+  let lambda = 0;
+  if (quotaAt(0) < totalFrames) {
+    let high = 1;
+    while (quotaAt(high) < totalFrames && high < 1e12) high *= 2;
+    let low = 0;
+    for (let step = 0; step < 80; step++) {
+      const middle = (low + high) / 2;
+      if (quotaAt(middle) < totalFrames) low = middle;
+      else high = middle;
+    }
+    lambda = high;
   }
 
-  return { counts, lower, upper };
+  const quotas = windows.map((window, index) => Math.min(
+    upper[index],
+    Math.max(lower[index], lambda * effectiveWeights[index]),
+  ));
+
+  // 实数配额向下取整，再按小数部分从大到小补足，保证总帧数精确等于预算。
+  const counts = quotas.map((quota) => Math.floor(quota + 1e-9));
+  let remaining = totalFrames - counts.reduce((sum, count) => sum + count, 0);
+  if (remaining > 0) {
+    const order = quotas
+      .map((quota, index) => ({ index, fraction: quota - Math.floor(quota) }))
+      .sort((a, b) => (b.fraction - a.fraction) || (a.index - b.index));
+    for (const item of order) {
+      if (remaining <= 0) break;
+      if (counts[item.index] < upper[item.index]) {
+        counts[item.index]++;
+        remaining--;
+      }
+    }
+  }
+  if (remaining !== 0) throw new Error('预算分配失败：整数取整后仍有余量');
+
+  return { counts, lower, upper, lambda };
 }
 
 /**
@@ -413,7 +404,7 @@ async function captureSegments({
   }
 }
 
-/** 预算模式入口：两遍解码 + 最优分配 + 流式拼图。 */
+/** 预算模式入口：两遍解码 + 平滑分配 + 流式拼图。 */
 export async function runBudget(options) {
   const {
     input, outDir,
@@ -510,7 +501,8 @@ export async function runBudget(options) {
         baseSlotSeconds: slotSec,
         baseSlotFps: maxFps,
         adaptWindow, windowSlots,
-        allocator: 'marginal-gain-optimal',
+        allocator: 'sqrt-activity-proportional',
+        activityWeightExponent: 0.5,
         layout, layoutCells, cell: [cellWidth, cellHeight],
         format: ext, quality,
         annotate, stampPos, stampDir,

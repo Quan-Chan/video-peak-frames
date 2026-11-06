@@ -71,43 +71,6 @@ const BASE = {
   adaptWindow: 1, noiseFloor: 0, dryRun: true, quiet: true,
 };
 
-/** 选中帧的得分总和：与 allocateBudget 的优化目标一致。 */
-function countsValue(windows, counts) {
-  return windows.reduce((total, window, index) => {
-    const picked = window.scores.slice(0, counts[index]);
-    return total + picked.reduce((sum, score) => sum + score, 0);
-  }, 0);
-}
-
-/** 穷举所有满足上下限与总帧数的分配，返回最大得分总和。 */
-function bruteForceBest(windows, lower, upper, totalFrames) {
-  const counts = lower.slice();
-  let best = -1;
-  const walk = (index, remaining) => {
-    if (index === windows.length) {
-      if (remaining === 0) best = Math.max(best, countsValue(windows, counts));
-      return;
-    }
-    const maxTake = Math.min(upper[index], remaining);
-    for (let take = lower[index]; take <= maxTake; take++) {
-      counts[index] = take;
-      walk(index + 1, remaining - take);
-    }
-    counts[index] = lower[index];
-  };
-  walk(0, totalFrames);
-  return best;
-}
-
-/** 固定种子的伪随机数，保证测试可复现。 */
-function makeRandom(seed) {
-  let state = seed >>> 0;
-  return () => {
-    state = (state * 1664525 + 1013904223) >>> 0;
-    return state / 0x100000000;
-  };
-}
-
 test('预算默认值：15 fps 预算、每窗口 1-30 帧', () => {
   assert.deepEqual(BUDGET_DEFAULTS, {
     budgetFps: 15, minFps: 1, maxFps: 30, adaptWindow: 1,
@@ -128,37 +91,22 @@ test('预算分配：总帧数精确，且每窗口在上下限内', () => {
   assert.deepEqual(result.counts, [3, 2]);
 });
 
-test('预算分配：与穷举结果的最优值一致', () => {
-  const random = makeRandom(20261106);
-  for (let caseIndex = 0; caseIndex < 25; caseIndex++) {
-    const windowCount = 1 + Math.floor(random() * 4);
-    const windows = [];
-    for (let windowIndex = 0; windowIndex < windowCount; windowIndex++) {
-      const candidateCount = 1 + Math.floor(random() * 4);
-      const scores = [];
-      for (let scoreIndex = 0; scoreIndex < candidateCount; scoreIndex++) {
-        scores.push(Math.floor(random() * 30));
-      }
-      scores.sort((a, b) => b - a);
-      windows.push({ duration: 1, scores });
-    }
+test('预算分配：按活动度平方根分配，中等窗口不会被尖峰窗口挤到下限', () => {
+  const windows = [
+    { duration: 1, activity: 9, scores: new Array(30).fill(10) },
+    { duration: 1, activity: 1, scores: new Array(30).fill(10) },
+  ];
+  const result = allocateBudget({ windows, totalFrames: 20, minFps: 1, maxFps: 30 });
+  // 权重 sqrt(9):sqrt(1) = 3:1，20 帧应分成 15:5，而不是接近 18:2。
+  assert.deepEqual(result.counts, [15, 5]);
+});
 
-    const minFps = 1;
-    const maxFps = 4;
-    const lower = windows.map((window) => Math.min(window.scores.length, 1));
-    const upper = windows.map((window) => Math.min(window.scores.length, maxFps));
-    const lowerTotal = lower.reduce((sum, count) => sum + count, 0);
-    const upperTotal = upper.reduce((sum, count) => sum + count, 0);
-    const totalFrames = lowerTotal + Math.floor(random() * (upperTotal - lowerTotal + 1));
-
-    const result = allocateBudget({ windows, totalFrames, minFps, maxFps });
-    assert.equal(result.counts.reduce((sum, count) => sum + count, 0), totalFrames);
-    assert.equal(
-      countsValue(windows, result.counts),
-      bruteForceBest(windows, lower, upper, totalFrames),
-      '第 ' + caseIndex + ' 组随机用例不是最优解',
-    );
-  }
+test('预算分配：同等变化时各窗口均分', () => {
+  const windows = Array.from({ length: 3 }, () => ({
+    duration: 1, activity: 9, scores: new Array(10).fill(10),
+  }));
+  const result = allocateBudget({ windows, totalFrames: 12, minFps: 1, maxFps: 10 });
+  assert.deepEqual(result.counts, [4, 4, 4]);
 });
 
 test('预算分配：同分时均匀铺开，不扎堆在最早窗口', () => {

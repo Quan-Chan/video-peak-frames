@@ -7,7 +7,7 @@ Video frame extraction tool. It splits a video into fixed-length time slots, pic
 - Frames are assigned to slots by their real timestamps. A slot without a source frame produces an empty frame, which occupies one cell and leaves the position of other frames unchanged.
 - Change is measured as a local peak, so local change and global change count equally.
 - Adaptive sampling: busy segments get more frames and quiet segments get fewer, with a frame rate clamped between a lower and an upper bound; segments tile the timeline.
-- Fixed-budget sampling: given an average frame rate budget, a full scan is followed by a globally optimal allocation by change, so the total frame count is fixed and the image count is determined.
+- Fixed-budget sampling: given an average frame rate budget, a full scan is followed by a smooth allocation by change, so the total frame count is fixed and the image count is determined.
 - Time range, slots per second, image format and quality, layout, and frames per image are configurable.
 - A timecode can be composited into the images, with selectable position and text direction.
 - File names carry the video name, time range, image quality, and layout.
@@ -50,7 +50,7 @@ With `--budget` the total frame count is fixed by the budget: `round(--budget-fp
 
 Budget mode first scans the whole range once: `--max-fps` defines the base grid (its reciprocal is the slot width), every base slot keeps the highest-change candidate frame, and only its score is retained; no pixels are kept in this pass.
 
-The frame budget is then allocated globally under the constraint that every window stays within its bounds and the total is exact. Candidate frames of a window are sorted by score, so the marginal gain of one more frame decreases; every window first receives its lower bound, then a max-heap repeatedly grants the next frame to the window with the largest global marginal gain until the budget is exhausted. This greedy allocation maximizes the total score of the selected frames.
+The frame budget is then allocated smoothly under the constraint that every window stays within its bounds and the total is exact: the weight of a window is the square root of its mean activity, which compresses the influence of spike segments so that moderately changing segments are not pushed to their lower bound. This is equivalent to maximizing the sum of `sqrt(activity) × log(frames)`; the continuous optimum is `clamp(λ × sqrt(activity), lower, upper)`. A bisection finds the unique λ, and the largest-remainder method rounds the result while keeping the total frame count exact.
 
 Selected slots are sorted by time and consecutive frames form the segments: the first segment starts at the range start and the last one ends at the range end. Every segment occupies one cell and may have a different duration; the last sheet may be partially filled.
 
