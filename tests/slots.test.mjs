@@ -12,6 +12,14 @@ test('50ms 槽边界按半开区间归属', () => {
   assert.equal(slotIndexOf(0.2, 20), 4);
 });
 
+test('动图时间戳容差：APNG 的 0.09999 仍按 0.1 归槽', () => {
+  // 普通视频传 0，保持严格半开区间语义。
+  assert.equal(slotIndexOf(0.09999, 20), 1);
+  // 动图按 0.5ms 容差，避免 timebase 舍入误差把边界帧挤到前一槽。
+  assert.equal(slotIndexOf(0.09999, 20, 0.0005), 2);
+  assert.equal(slotIndexOf(0.1, 20, 0.0005), 2);
+});
+
 test('10fps 素材：奇数槽为空且槽位不压实（对应流程图的 0 / 空帧1 / 0.1 / 空帧2 / 0.2）', () => {
   const pts = Array.from({ length: 10 }, (_, i) => i / 10);
   const plan = planSlots({ duration: 1, lastPts: 0.9, slotsPerSecond: 20, framesPerSheet: 4 });

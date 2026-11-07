@@ -58,3 +58,30 @@ test('时间码格式', () => {
   assert.equal(formatTimecode(0.125), '00:00.125');
   assert.equal(formatTimecode(61.05), '01:01.050');
 });
+
+test('RGBA 采样器：透明像素按黑色计入，与黑底合成一致', () => {
+  const W = 320;
+  const H = 180;
+  const opaqueWhite = Buffer.alloc(W * H * 4);
+  for (let i = 0; i < W * H; i++) {
+    opaqueWhite[i * 4] = 255;
+    opaqueWhite[i * 4 + 1] = 255;
+    opaqueWhite[i * 4 + 2] = 255;
+    opaqueWhite[i * 4 + 3] = 255;
+  }
+  const transparent = Buffer.alloc(W * H * 4, 0);
+
+  const white = toGray(opaqueWhite, W, H, undefined, 4);
+  const clear = toGray(transparent, W, H, undefined, 4);
+  assert.ok(white.every((value) => value === 255));
+  assert.ok(clear.every((value) => value === 0));
+
+  // 半透明白色合成到黑底后约为 128，验证 alpha 加权路径。
+  const half = Buffer.from(opaqueWhite);
+  for (let i = 0; i < W * H; i++) half[i * 4 + 3] = 128;
+  const halfGray = toGray(half, W, H, undefined, 4);
+  assert.ok(halfGray.every((value) => Math.abs(value - 128) <= 1), '半透明亮度异常');
+
+  // 通道数不同的采样器不能共用缓存。
+  assert.notEqual(getGraySampler(W, H), getGraySampler(W, H, 4));
+});

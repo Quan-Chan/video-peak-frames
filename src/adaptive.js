@@ -1,13 +1,13 @@
 import { mkdir } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { probe } from './probe.js';
+import { probe, sourceNotices } from './probe.js';
 import { decodeFrames } from './decode.js';
 import { getGraySampler, changeScore, createScoreScratch, BLOCK_PX, SAMPLE_W, SAMPLE_H } from './score.js';
 import { slotIndexOf } from './slots.js';
 import { SegmentSheetWriter } from './segment-writer.js';
 import { sanitizeVideoName } from './naming.js';
-import { resolveCommonOptions } from './prepare.js';
+import { resolveCommonOptions, outputSupportsAlpha } from './prepare.js';
 import { ManifestSpool, readSheets } from './manifest.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -84,7 +84,7 @@ export function splitWindowSegments({
         pts: picked.pts, frameIndex: picked.frameIndex,
         score: picked.score, globalMAD: picked.globalMAD,
         candidates: picked.candidates, pickedBy: picked.pickedBy,
-        buffer: picked.buffer,
+        channels: picked.channels ?? 3, buffer: picked.buffer,
         window: windowIndex, windowFps,
       });
     } else {
@@ -147,6 +147,10 @@ export async function runAdaptive(options) {
   });
 
   const info = await probe(input);
+  // 输出 JPG 不支持透明，保持黑色合成为兜底；PNG/WebP 保留源帧的透明通道。
+  const preserveAlpha = info.hasAlpha && outputSupportsAlpha(ext);
+  const frameChannels = preserveAlpha ? 4 : 3;
+  for (const notice of sourceNotices(info, { preserveAlpha })) console.error(`[警告] ${notice}`);
   const segmentDuration = endSec != null ? endSec - startSec : Math.max(info.duration - startSec, 0);
   const slotSec = 1 / upperFps;
   const totalBaseSlots = Math.max(1, Math.ceil(segmentDuration / slotSec - 1e-9));
@@ -157,7 +161,7 @@ export async function runAdaptive(options) {
   const manifest = new ManifestSpool({ outDir });
   const manifestPath = manifest.manifestPath;
 
-  const graySampler = getGraySampler(cellWidth, cellHeight);
+  const graySampler = getGraySampler(cellWidth, cellHeight, frameChannels);
   const scoreScratch = createScoreScratch(blockPx);
   const grayBuffers = [new Uint8Array(SAMPLE_W * SAMPLE_H), new Uint8Array(SAMPLE_W * SAMPLE_H)];
   let grayIndex = 0;
@@ -189,7 +193,7 @@ export async function runAdaptive(options) {
       quality, layout, ext,
       cellWidth, cellHeight, format: ext,
       annotate, gap, stampPos, stampDir,
-      outDir, dryRun, quiet, manifest,
+      outDir, dryRun, quiet, manifest, outputAlpha: preserveAlpha,
     });
 
     /** 把当前槽的候选结果放进窗口缓冲。 */
@@ -208,6 +212,7 @@ export async function runAdaptive(options) {
         pickedBy: hasPeak ? 'peak' : 'mid-slot',
         pts: picked.pts,
         frameIndex: picked.frameIndex,
+        channels: picked.channels,
         buffer: dryRun ? null : picked.buffer,
       };
       windowCandidateSlots++;
@@ -251,6 +256,7 @@ export async function runAdaptive(options) {
 
     for await (const frame of decodeFrames({
       input, cellWidth, cellHeight, start: startSec, end: endSec,
+      hasAlpha: info.hasAlpha, preserveAlpha,
     })) {
       decoded++;
       const index = frame.index;
@@ -258,7 +264,7 @@ export async function runAdaptive(options) {
       const pts = frame.pts == null
         ? (info.avgFrameRate ? index / info.avgFrameRate : index / upperFps)
         : frame.pts - ptsBase;
-      const slotIndex = slotIndexOf(pts, upperFps);
+      const slotIndex = slotIndexOf(pts, upperFps, info.slotToleranceSeconds);
 
       if (slotIndex !== currentSlot) {
         storeSlot();
@@ -285,7 +291,7 @@ export async function runAdaptive(options) {
 
       const score = change.score;
       const candidate = {
-        buffer: frame.buffer, pts, frameIndex: index,
+        buffer: frame.buffer, pts, frameIndex: index, channels: frame.channels,
         score, globalMAD: change.globalMAD, index: slotCount,
       };
       if (!slotBest || score > slotBest.score) slotBest = candidate;
@@ -316,7 +322,7 @@ export async function runAdaptive(options) {
         windowSeconds: 1, adaptLow, adaptHigh,
         adaptMetric: 'window-mean-local-peak',
         layout, layoutCells, cell: [cellWidth, cellHeight],
-        format: ext, quality,
+        format: ext, quality, preserveAlpha,
         annotate, stampPos, stampDir,
         metric: 'local-peak', blockPx, sample: [SAMPLE_W, SAMPLE_H], noiseFloor,
       },
@@ -326,6 +332,12 @@ export async function runAdaptive(options) {
         segmentDuration: Number(segmentDuration.toFixed(4)),
         rFrameRate: Number(info.rFrameRate.toFixed(4)),
         avgFrameRate: Number(info.avgFrameRate.toFixed(4)),
+        codec: info.codec,
+        formatName: info.formatName,
+        animated: info.animated,
+        frameCount: info.frameCount,
+        durationSource: info.durationSource,
+        hasAlpha: info.hasAlpha,
         decodedFrames: decoded,
         ptsFrameCount: decoded,
         ptsSource: 'showinfo',

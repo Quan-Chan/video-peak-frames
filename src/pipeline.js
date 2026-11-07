@@ -1,13 +1,13 @@
 import { mkdir } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { probe } from './probe.js';
+import { probe, sourceNotices } from './probe.js';
 import { decodeFrames } from './decode.js';
 import { getGraySampler, changeScore, createScoreScratch, BLOCK_PX, SAMPLE_W, SAMPLE_H } from './score.js';
 import { slotLayout, slotIndexOf } from './slots.js';
 import { composeSheet } from './compose.js';
 import { sanitizeVideoName, buildFileName } from './naming.js';
-import { resolveCommonOptions } from './prepare.js';
+import { resolveCommonOptions, outputSupportsAlpha } from './prepare.js';
 import { ManifestSpool, readSheets } from './manifest.js';
 import { runAdaptive } from './adaptive.js';
 import { runBudget } from './budget.js';
@@ -50,6 +50,7 @@ class SheetWriter {
     this.outDir = options.outDir;
     this.dryRun = options.dryRun;
     this.quiet = options.quiet;
+    this.outputAlpha = options.outputAlpha ?? false;
 
     this.queue = [];
     this.enqueued = 0;
@@ -73,7 +74,7 @@ class SheetWriter {
           pts: picked.pts, frameIndex: picked.frameIndex,
           score: picked.score, globalMAD: picked.globalMAD,
           candidates: picked.candidates, pickedBy: picked.pickedBy,
-          buffer: picked.buffer,
+          channels: picked.channels ?? 3, buffer: picked.buffer,
         }
         : {
           slot: i, start, end, empty: true, reason: plan.emptyReason(i),
@@ -121,6 +122,7 @@ class SheetWriter {
         gap: this.gap,
         stampPos: this.stampPos,
         stampDir: this.stampDir,
+        outputAlpha: this.outputAlpha,
       });
     }
     // 失败在 shift 里重新抛出；这里先挂一个空处理，避免队列中其余图触发未捕获拒绝。
@@ -210,6 +212,10 @@ export async function run(options) {
   const { ext, layoutCells, perSheet, startSec, endSec } = resolveCommonOptions(options);
 
   const info = await probe(input);
+  // 输出 JPG 不支持透明，保持黑色合成为兜底；PNG/WebP 保留源帧的透明通道。
+  const preserveAlpha = info.hasAlpha && outputSupportsAlpha(ext);
+  const frameChannels = preserveAlpha ? 4 : 3;
+  for (const notice of sourceNotices(info, { preserveAlpha })) console.error(`[警告] ${notice}`);
   const segmentDuration = endSec != null ? endSec - startSec : Math.max(info.duration - startSec, 0);
 
   // 槽数只由用户给定的区间决定，末帧不得顶出额外的槽。
@@ -222,7 +228,7 @@ export async function run(options) {
   const manifest = new ManifestSpool({ outDir });
   const manifestPath = manifest.manifestPath;
 
-  const graySampler = getGraySampler(cellWidth, cellHeight);
+  const graySampler = getGraySampler(cellWidth, cellHeight, frameChannels);
   const scoreScratch = createScoreScratch(blockPx);
   const grayBuffers = [new Uint8Array(SAMPLE_W * SAMPLE_H), new Uint8Array(SAMPLE_W * SAMPLE_H)];
   let grayIndex = 0;
@@ -245,7 +251,7 @@ export async function run(options) {
       quality, layout, ext,
       cellWidth, cellHeight, format: ext,
       annotate, gap, stampPos, stampDir,
-      outDir, dryRun, quiet, manifest,
+      outDir, dryRun, quiet, manifest, outputAlpha: preserveAlpha,
     });
 
     const flushReady = async () => {
@@ -268,6 +274,7 @@ export async function run(options) {
         globalMAD: Number((best?.globalMAD ?? 0).toFixed(3)),
         candidates: candidateCount,
         pickedBy: hasPeak ? 'peak' : 'mid-slot',
+        channels: picked.channels ?? 3,
         // --dry-run 只要数值，不保留像素，避免大视频白占内存。
         buffer: dryRun ? null : picked.buffer,
       });
@@ -275,6 +282,7 @@ export async function run(options) {
 
     for await (const frame of decodeFrames({
       input, cellWidth, cellHeight, start: startSec, end: endSec,
+      hasAlpha: info.hasAlpha, preserveAlpha,
     })) {
       decoded++;
       const index = frame.index;
@@ -284,7 +292,7 @@ export async function run(options) {
       const pts = frame.pts == null
         ? (info.avgFrameRate ? index / info.avgFrameRate : index / slotsPerSecond)
         : frame.pts - ptsBase;
-      const slotIndex = slotIndexOf(pts, slotsPerSecond);
+      const slotIndex = slotIndexOf(pts, slotsPerSecond, info.slotToleranceSeconds);
 
       if (slotIndex !== currentSlot) {
         closeSlot();
@@ -308,7 +316,7 @@ export async function run(options) {
 
       const score = change.score;
       const candidate = {
-        buffer: frame.buffer, pts, frameIndex: index,
+        buffer: frame.buffer, pts, frameIndex: index, channels: frame.channels,
         score, globalMAD: change.globalMAD, index: candidateCount,
       };
       if (!best || score > best.score) best = candidate;
@@ -331,7 +339,7 @@ export async function run(options) {
         slotsPerSecond, framesPerSheet: perSheet,
         slotSeconds: plan.slotSec,
         layout, layoutCells, cell: [cellWidth, cellHeight],
-        format: ext, quality,
+        format: ext, quality, preserveAlpha,
         annotate, stampPos, stampDir,
         metric: 'local-peak', blockPx, sample: [SAMPLE_W, SAMPLE_H], noiseFloor,
       },
@@ -341,6 +349,12 @@ export async function run(options) {
         segmentDuration: Number(segmentDuration.toFixed(4)),
         rFrameRate: Number(info.rFrameRate.toFixed(4)),
         avgFrameRate: Number(info.avgFrameRate.toFixed(4)),
+        codec: info.codec,
+        formatName: info.formatName,
+        animated: info.animated,
+        frameCount: info.frameCount,
+        durationSource: info.durationSource,
+        hasAlpha: info.hasAlpha,
         decodedFrames: decoded,
         ptsFrameCount: decoded,
         ptsSource: 'showinfo',

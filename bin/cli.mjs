@@ -18,13 +18,15 @@ const HELP = `视频抽帧工具 vpf
   vpf -i input.mp4 --start 5 --end 10 --slots-per-second 10
 
 一、基础参数（取多少、多密、什么格式）
-  -i, --input <file>        输入视频
+  -i, --input <file>        输入视频或动图（GIF / APNG）
   -o, --out <dir>           输出目录，默认 ./frames
       --start <sec>         截取起点（秒），默认 0
       --end <sec>           截取终点（秒），默认到片尾
       --slots-per-second n  采样频率：每秒切几槽，默认 20（即 50ms 一槽），
                             可调 10（100ms）甚至 1（1 秒一槽）
-      --format <s>          jpg（默认，jpeg 等价）/ png / webp
+      --format <s>          jpg（默认，jpeg 等价）/ png / webp。
+                            png / webp 会保留动图的透明通道；jpg 不支持透明，
+                            动图的透明区域按黑色合成
       --quality <1-100>     图片质量，默认 90；png 为无损格式，
                             此值映射为压缩级别（越大文件越大越快）
 
@@ -52,6 +54,13 @@ const HELP = `视频抽帧工具 vpf
       --quiet               不打印进度
   -h, --help                显示帮助
 
+输入格式：
+  输入由 ffmpeg 按内容探测，扩展名不参与判断；MP4 / MKV / MOV / WebM / AVI 等
+  容器与 GIF / APNG 动图都可直接输入。动图同样按槽规则处理：没有源帧的槽输出
+  空帧，槽位不压实；动图透明通道在 png/webp 输出中保留、jpg 输出按黑色合成；
+  只有一帧的静态图片会被拒绝。
+  动画 WebP 需要 ffmpeg 支持 ANIM/ANMF，当前构建不支持时会明确报错。
+
 四、自适应采样（可选）
       --adaptive            按画面变化量分配帧率：变化多的片段多抽，变化少的少抽。
                             开启后以 --max-fps 为基准网格，按固定 1 秒窗口统计活动度
@@ -72,6 +81,8 @@ const HELP = `视频抽帧工具 vpf
       --budget-decay <sec>  活动度衰减时间常数，默认 3.5；越大掉帧越慢，越小恢复越快
                             预算模式需要完整扫描一遍再全局分配，因此会解码两遍；
                             每格是一段连续区段，最后一张图可能不满
+                            动图帧率通常较低，--budget-fps 超过源能提供的帧数时
+                            会报错并给出可达上限，需要调低 --budget-fps
                             --budget 与 --adaptive 不能同时使用
 
 输出文件名统一为：

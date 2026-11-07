@@ -6,15 +6,19 @@ export const SAMPLE_H = 180;
 export const BLOCK_PX = 16;
 
 /**
- * 把 rgb24 帧做区域平均降采样成灰度图。
+ * 把 rgb24 / rgba 帧做区域平均降采样成灰度图。
  *
- * 采样网格只与输入尺寸有关，按尺寸缓存采样器，逐帧复用：
+ * 采样网格只与输入尺寸有关，按「尺寸 + 通道数」缓存采样器，逐帧复用：
  * 取整、边界与倒数权重都在建表时算好，逐帧只剩像素累加。
  * 区域平均本身就是低通，用来压掉编码噪点与颗粒，避免「变化最大」选到噪点帧。
+ *
+ * 4 通道（RGBA）输入用于输出 PNG/WebP 时保留透明通道的场景：打分仍按
+ * 「透明像素合成到黑色」计算（channel × alpha / 255），与旧版把整帧压到
+ * 黑底的打分结果一致，不透明视频的分数完全不受影响。
  */
 const samplerCache = new Map();
 
-function buildSampler(width, height) {
+function buildSampler(width, height, channels) {
   const x0 = new Uint16Array(SAMPLE_W);
   const x1 = new Uint16Array(SAMPLE_W);
   const y0 = new Uint16Array(SAMPLE_H);
@@ -46,7 +50,29 @@ function buildSampler(width, height) {
       for (let sx = 0; sx < SAMPLE_W; sx++) {
         const fromX = x0[sx];
         const toX = x1[sx];
-        // 先分别累加 R/G/B，再统一乘亮度系数：比逐像素算亮度少一次乘加。
+
+        if (channels === 4) {
+          // 先按 alpha 加权累加，再统一换算到 0..255：等价于把透明像素
+          // 合成到黑色底之后再取亮度。
+          let r = 0;
+          let g = 0;
+          let b = 0;
+          for (let y = fromY; y < toY; y++) {
+            let p = (y * width + fromX) * 4;
+            for (let x = fromX; x < toX; x++) {
+              const alpha = rgb[p + 3];
+              r += rgb[p] * alpha;
+              g += rgb[p + 1] * alpha;
+              b += rgb[p + 2] * alpha;
+              p += 4;
+            }
+          }
+          out[o] = Math.round((0.299 * r + 0.587 * g + 0.114 * b) * invCount[o] / 255);
+          o++;
+          continue;
+        }
+
+        // rgb24：先分别累加 R/G/B，再统一乘亮度系数，比逐像素算亮度少一次乘加。
         let r = 0;
         let g = 0;
         let b = 0;
@@ -67,18 +93,18 @@ function buildSampler(width, height) {
   };
 }
 
-export function getGraySampler(width, height) {
-  const key = `${width}x${height}`;
+export function getGraySampler(width, height, channels = 3) {
+  const key = `${width}x${height}x${channels}`;
   let sampler = samplerCache.get(key);
   if (!sampler) {
-    sampler = buildSampler(width, height);
+    sampler = buildSampler(width, height, channels);
     samplerCache.set(key, sampler);
   }
   return sampler;
 }
 
-export function toGray(rgb, width, height, out = new Uint8Array(SAMPLE_W * SAMPLE_H)) {
-  return getGraySampler(width, height)(rgb, out);
+export function toGray(rgb, width, height, out = new Uint8Array(SAMPLE_W * SAMPLE_H), channels = 3) {
+  return getGraySampler(width, height, channels)(rgb, out);
 }
 
 /** 相邻帧平均绝对差（全局均值），0..255 尺度。仅作诊断，不用于排峰。 */

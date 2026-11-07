@@ -29,6 +29,7 @@ export class SegmentSheetWriter {
     this.outDir = options.outDir;
     this.dryRun = options.dryRun;
     this.quiet = options.quiet;
+    this.outputAlpha = options.outputAlpha ?? false;
 
     this.cells = [];
     this.queue = [];
@@ -83,6 +84,7 @@ export class SegmentSheetWriter {
         gap: this.gap,
         stampPos: this.stampPos,
         stampDir: this.stampDir,
+        outputAlpha: this.outputAlpha,
       });
     }
     // 失败在 shift 里重新抛出；这里先挂一个空处理，避免队列中其余图触发未捕获拒绝。

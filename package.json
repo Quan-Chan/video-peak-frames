@@ -1,6 +1,6 @@
 {
   "name": "video-peak-frames",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "description": "按时间槽抽取变化最大的帧并拼图，支持固定网格、自适应与固定预算采样",

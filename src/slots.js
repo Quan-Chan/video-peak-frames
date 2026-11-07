@@ -1,6 +1,12 @@
-/** pts -> 全局槽号。半开区间 [k/20, (k+1)/20)，eps 用来消除浮点边界误差。 */
-export function slotIndexOf(pts, slotsPerSecond = 20) {
-  const index = Math.floor(pts * slotsPerSecond + 1e-9);
+/**
+ * pts -> 全局槽号。半开区间 [k/20, (k+1)/20)。
+ *
+ * toleranceSeconds 只给动图（GIF/APNG）用：它们的 timebase 会把 0.1 秒
+ * 换算成 0.09999 这类值，严格按半开区间会落进前一槽。普通视频传 0，
+ * 保持原有槽归属逐字节不变。
+ */
+export function slotIndexOf(pts, slotsPerSecond = 20, toleranceSeconds = 0) {
+  const index = Math.floor(pts * slotsPerSecond + toleranceSeconds * slotsPerSecond + 1e-9);
   return index < 0 ? 0 : index;
 }
 

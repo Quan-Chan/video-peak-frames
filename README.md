@@ -4,6 +4,7 @@ Video frame extraction tool. It splits a video into fixed-length time slots, pic
 
 ## Features
 
+- Input is detected by ffmpeg from the file content: video containers (MP4/MKV/MOV/WebM/AVI and others) and GIF/APNG animations are accepted directly.
 - Frames are assigned to slots by their real timestamps. A slot without a source frame produces an empty frame, which occupies one cell and leaves the position of other frames unchanged.
 - Change is measured as a local peak, so local change and global change count equally.
 - Adaptive sampling: busy segments get more frames and quiet segments get fewer, with a frame rate clamped between a lower and an upper bound; segments tile the timeline.
@@ -71,6 +72,18 @@ Adjacent cells are separated by `--gap` pixels on a white canvas.
 Timecode text is taken from the Roboto Mono glyph outlines, converted to SVG paths by `opentype.js`, and composited into the image.
 Rendering does not use SVG `<text>` and does not read system fonts.
 
+## Input formats
+
+The input format is detected by ffmpeg from the file content; the extension is not used. Any container and codec that ffmpeg can decode works (MP4, MKV, MOV, WebM, AVI, and others). Animated images are supported directly:
+
+- GIF and APNG follow the same slot rules as video: frames are assigned by their real timestamps, slots without a source frame produce empty frames, and slot positions are never compacted.
+- An APNG container has no total duration field, so the duration is derived from the frame table (pts + duration) and `source.durationSource` in `manifest.json` is recorded as `packets`.
+- Transparency of animated images is preserved in `png` / `webp` output (the canvas is RGBA and transparent areas of frames stay transparent in the image). `jpg` cannot store alpha, so transparent areas are composited onto a black background.
+- A static image with a single frame (PNG/JPG/single-frame GIF) is not a video or animation and is rejected.
+- Animated WebP needs ffmpeg support for `ANIM/ANMF`; when the installed build does not support it, the tool reports an error and the file should be converted to GIF/APNG first.
+- Animated images usually have a lower frame rate than the default 20 slots per second, so slots without a source frame become empty frames, exactly as for low-frame-rate video. In budget mode the total frame count comes from `--budget-fps`; when it exceeds what the source can provide the tool reports an error with the reachable upper bound.
+- The `source` section of `manifest.json` records `codec`, `formatName`, `animated`, `frameCount`, `durationSource`, and `hasAlpha`.
+
 ## Install
 
 ```bash
@@ -98,7 +111,7 @@ node bin/cli.mjs input.mp4 -o out --budget --budget-fps 10 --max-fps 30
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `-i, --input` |  | Input video |
+| `-i, --input` |  | Input video or animated image (GIF/APNG) |
 | `-o, --out` | `./frames` | Output directory |
 | `--start` | `0` | Range start in seconds |
 | `--end` | end of video | Range end in seconds |
@@ -111,7 +124,7 @@ node bin/cli.mjs input.mp4 -o out --budget --budget-fps 10 --max-fps 30
 | `--budget-decay` | `3.5` | Activity decay time constant in seconds for budget mode, 0.1-60; larger falls back more slowly |
 | `--adapt-low` | `1` | Activity at or below this value uses the lower rate |
 | `--adapt-high` | `40` | Activity at or above this value uses the upper rate |
-| `--format` | `jpg` | `jpg` / `png` / `webp`; `jpeg` is an alias of `jpg` |
+| `--format` | `jpg` | `jpg` / `png` / `webp`; `jpeg` is an alias of `jpg`. `png` and `webp` preserve transparency of animated images; `jpg` composites it onto black |
 | `--quality` | `90` | Image quality, 1-100. png is lossless; the value maps to the compression level |
 | `--layout` | `2x2` | Layout as columns x rows |
 | `--frames-per-sheet` | cells of layout | Frames per image. Errors out when it exceeds the cell count |
@@ -141,6 +154,8 @@ clip__t5.00s-5.40s__q90__2x2__00001.jpg
 ```
 
 `manifest.json` contains `range`, `params`, `source`, `summary`, and `sheets`. Each entry of `sheets` corresponds to one image and records its time range and, per cell, the slot number, timestamp, score, candidate count, and selection basis.
+
+`params.preserveAlpha` records whether transparency was preserved (true when the output is `png` / `webp` and the source has alpha); the `source` section also records `codec`, `formatName`, `animated`, `frameCount`, `durationSource`, and `hasAlpha` for auditing the input and animation metadata.
 
 In adaptive and budget modes the file name format is unchanged, but the time span of each image varies with the density. Adaptive mode sets `params.mode` to `adaptive` and records `minFps`, `maxFps`, `windowSeconds`, `adaptLow`, and `adaptHigh`; budget mode sets `params.mode` to `budget` and records `budgetFps`, `budgetFrames`, `minFps`, `maxFps`, `windowSeconds`, `activityDecaySeconds`, and `allocator`. In both modes every cell additionally records `end`, `duration`, `window`, and `windowFps`, and `summary` gains `windows` and `avgFps`.
 

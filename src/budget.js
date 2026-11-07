@@ -1,13 +1,13 @@
 import { mkdir } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { probe } from './probe.js';
+import { probe, sourceNotices } from './probe.js';
 import { decodeFrames } from './decode.js';
 import {
   getGraySampler, changeScore, createScoreScratch, BLOCK_PX, SAMPLE_W, SAMPLE_H,
 } from './score.js';
 import { sanitizeVideoName } from './naming.js';
-import { resolveCommonOptions } from './prepare.js';
+import { resolveCommonOptions, outputSupportsAlpha } from './prepare.js';
 import { ManifestSpool, readSheets } from './manifest.js';
 import { SegmentSheetWriter } from './segment-writer.js';
 
@@ -123,7 +123,7 @@ function createSlotRecords(totalSlots) {
  */
 async function scanSlotRecords({
   input, cellWidth, cellHeight, startSec, endSec,
-  maxFps, totalSlots, sourceFps, noiseFloor, blockPx,
+  maxFps, totalSlots, sourceFps, noiseFloor, blockPx, hasAlpha,
 }) {
   const records = createSlotRecords(totalSlots);
   const sampler = getGraySampler(cellWidth, cellHeight);
@@ -154,7 +154,7 @@ async function scanSlotRecords({
   };
 
   for await (const frame of decodeFrames({
-    input, cellWidth, cellHeight, start: startSec, end: endSec,
+    input, cellWidth, cellHeight, start: startSec, end: endSec, hasAlpha,
   })) {
     decoded++;
     const index = frame.index;
@@ -430,7 +430,7 @@ function validateBudgetOptions({ budgetFps, minFps, maxFps, decaySeconds }) {
  */
 async function captureSegments({
   input, cellWidth, cellHeight, startSec, endSec,
-  maxFps, sourceFps, segments, writer,
+  maxFps, sourceFps, segments, writer, hasAlpha, preserveAlpha,
 }) {
   let next = 0;
   let ptsBase = null;
@@ -447,7 +447,7 @@ async function captureSegments({
   };
 
   for await (const frame of decodeFrames({
-    input, cellWidth, cellHeight, start: startSec, end: endSec,
+    input, cellWidth, cellHeight, start: startSec, end: endSec, hasAlpha, preserveAlpha,
   })) {
     if (frame.pts != null && ptsBase === null) ptsBase = frame.pts;
     const pts = frame.pts == null
@@ -467,9 +467,11 @@ async function captureSegments({
     if (slot === segment.baseSlot && !segment.buffer) {
       if (frame.index === segment.frameIndex) {
         segment.buffer = frame.buffer;
+        segment.channels = frame.channels;
         segment.fallbackBuffer = null;
       } else if (!segment.fallbackBuffer) {
         segment.fallbackBuffer = frame.buffer;
+        segment.channels = frame.channels;
       }
     }
   }
@@ -499,6 +501,10 @@ export async function runBudget(options) {
   const { ext, layoutCells, perSheet, startSec, endSec } = resolveCommonOptions(options);
 
   const info = await probe(input);
+  // 输出 JPG 不支持透明，保持黑色合成为兜底；PNG/WebP 保留源帧的透明通道。
+  // 第一遍扫描只需要打分，始终按黑底合成后的 RGB 计算，和第二遍的取帧解耦。
+  const preserveAlpha = info.hasAlpha && outputSupportsAlpha(ext);
+  for (const notice of sourceNotices(info, { preserveAlpha })) console.error(`[警告] ${notice}`);
   const segmentDuration = endSec != null ? endSec - startSec : Math.max(info.duration - startSec, 0);
   if (!(segmentDuration > 0)) throw new Error('截取区间为空，无法抽帧');
 
@@ -512,7 +518,7 @@ export async function runBudget(options) {
   // 第一遍：只扫描活动度，不保留像素。
   const { records, decoded } = await scanSlotRecords({
     input, cellWidth, cellHeight, startSec, endSec,
-    maxFps, totalSlots, sourceFps, noiseFloor, blockPx,
+    maxFps, totalSlots, sourceFps, noiseFloor, blockPx, hasAlpha: info.hasAlpha,
   });
   const windows = buildWindows(records, totalSlots, windowSlots, slotSec, segmentDuration);
 
@@ -547,7 +553,7 @@ export async function runBudget(options) {
     quality, layout, ext,
     cellWidth, cellHeight, format: ext,
     annotate, gap, stampPos, stampDir,
-    outDir, dryRun, quiet, manifest,
+    outDir, dryRun, quiet, manifest, outputAlpha: preserveAlpha,
   });
 
   try {
@@ -557,6 +563,7 @@ export async function runBudget(options) {
       await captureSegments({
         input, cellWidth, cellHeight, startSec, endSec,
         maxFps, sourceFps, segments, writer,
+        hasAlpha: info.hasAlpha, preserveAlpha,
       });
     }
     await writer.finish();
@@ -585,7 +592,7 @@ export async function runBudget(options) {
         activityDecaySeconds: decaySeconds,
         activityTrailingWeights: ACTIVITY_TRAILING_WEIGHTS,
         layout, layoutCells, cell: [cellWidth, cellHeight],
-        format: ext, quality,
+        format: ext, quality, preserveAlpha,
         annotate, stampPos, stampDir,
         metric: 'local-peak', blockPx, sample: [SAMPLE_W, SAMPLE_H], noiseFloor,
       },
@@ -595,6 +602,12 @@ export async function runBudget(options) {
         segmentDuration: Number(segmentDuration.toFixed(4)),
         rFrameRate: Number(info.rFrameRate.toFixed(4)),
         avgFrameRate: Number(info.avgFrameRate.toFixed(4)),
+        codec: info.codec,
+        formatName: info.formatName,
+        animated: info.animated,
+        frameCount: info.frameCount,
+        durationSource: info.durationSource,
+        hasAlpha: info.hasAlpha,
         decodedFrames: decoded,
         ptsFrameCount: decoded,
         ptsSource: 'showinfo',

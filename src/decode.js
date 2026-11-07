@@ -9,14 +9,36 @@ const PTS_WAIT_TIMEOUT_MS = 10000;
  * 单遍流式解码。滤镜链末尾挂 showinfo，把每帧的 pts_time 打到 stderr，
  * 从而免掉一次 ffprobe 全片扫描，且时间戳与帧严格一一对应。
  * start/end 用 ffmpeg 输入侧 -ss / -t 截取，只解码目标片段。
+ *
+ * 含 alpha 的输入（GIF/APNG 动图常见）以 rgba 解码，并在滤镜链里用透明色
+ * 补齐到单格尺寸：
+ * - preserveAlpha=true（输出 PNG/WebP）：保留 rgba，透明像素原样交给合成；
+ * - preserveAlpha=false（输出 JPG）：在 JS 里按 channel × alpha / 255 合成到
+ *   黑色背景，再交给打分与拼图。
+ * 不用 filter_complex 叠黑底，是因为 overlay 的主输入决定输出时间戳，
+ * 会破坏 showinfo 与源帧的对应关系；JS 处理保持原滤镜链与时间戳不变。
  */
-export async function* decodeFrames({ input, cellWidth, cellHeight, start = 0, end = null }) {
-  const filter = [
-    `scale=${cellWidth}:${cellHeight}:force_original_aspect_ratio=decrease`,
-    `pad=${cellWidth}:${cellHeight}:(ow-iw)/2:(oh-ih)/2`,
-    'setsar=1',
-    'showinfo',
-  ].join(',');
+export async function* decodeFrames({
+  input, cellWidth, cellHeight, start = 0, end = null, hasAlpha = false, preserveAlpha = false,
+}) {
+  const preserve = hasAlpha && preserveAlpha;
+  // 不透明输入沿用旧滤镜链，保证原有视频输出逐字节不变；
+  // 含 alpha 的输入先把像素格式统一成 rgba，再用透明色补边，
+  // 这样缩放产生的黑边不会变成不透明黑块。
+  const filter = hasAlpha
+    ? [
+      `scale=${cellWidth}:${cellHeight}:force_original_aspect_ratio=decrease`,
+      'format=rgba',
+      `pad=${cellWidth}:${cellHeight}:(ow-iw)/2:(oh-ih)/2:color=0x00000000`,
+      'setsar=1',
+      'showinfo',
+    ].join(',')
+    : [
+      `scale=${cellWidth}:${cellHeight}:force_original_aspect_ratio=decrease`,
+      `pad=${cellWidth}:${cellHeight}:(ow-iw)/2:(oh-ih)/2`,
+      'setsar=1',
+      'showinfo',
+    ].join(',');
 
   // showinfo 走 av_log 的 INFO 级别，用 -v error 会把它吞掉。
   const args = ['-v', 'info', '-nostdin'];
@@ -24,7 +46,7 @@ export async function* decodeFrames({ input, cellWidth, cellHeight, start = 0, e
   if (start > 0) args.push('-ss', String(start));
   args.push('-i', input, '-map', '0:v:0', '-an', '-sn', '-dn');
   if (end != null) args.push('-t', String(Math.max(0.001, end - start)));
-  args.push('-vf', filter, '-pix_fmt', 'rgb24', '-vsync', '0', '-f', 'rawvideo', 'pipe:1');
+  args.push('-vf', filter, '-pix_fmt', hasAlpha ? 'rgba' : 'rgb24', '-vsync', '0', '-f', 'rawvideo', 'pipe:1');
 
   const proc = spawn(ffmpegPath, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -98,7 +120,8 @@ export async function* decodeFrames({ input, cellWidth, cellHeight, start = 0, e
     });
   });
 
-  const frameSize = cellWidth * cellHeight * 3;
+  const pixelCount = cellWidth * cellHeight;
+  const frameSize = pixelCount * (hasAlpha ? 4 : 3);
   // 按帧尺寸累加：管道分块边界与帧边界无关，逐块拼到整帧后再交出。
   // 交出的缓冲区归调用方所有，下一帧重新分配，避免与后续读取互相覆盖。
   let frame = Buffer.allocUnsafe(frameSize);
@@ -119,7 +142,12 @@ export async function* decodeFrames({ input, cellWidth, cellHeight, start = 0, e
         const current = index++;
         const cached = takePts(current);
         const pts = cached !== undefined ? cached : await waitPts(current);
-        yield { index: current, buffer: frame, pts };
+        yield {
+          index: current,
+          buffer: hasAlpha && !preserve ? flattenAlpha(frame, pixelCount) : frame,
+          channels: preserve ? 4 : 3,
+          pts,
+        };
         frame = Buffer.allocUnsafe(frameSize);
         filled = 0;
       }
@@ -134,4 +162,25 @@ export async function* decodeFrames({ input, cellWidth, cellHeight, start = 0, e
   if (result.code !== 0) {
     throw new Error(`ffmpeg 解码失败（退出码 ${result.code}）：${stderrText.trim() || '无错误输出'}`);
   }
+}
+
+/**
+ * RGBA -> RGB24，透明像素按黑色合成：out = channel × alpha / 255。
+ * 不透明像素直接复制，避免额外取整改变原图颜色。
+ */
+function flattenAlpha(rgba, pixels) {
+  const rgb = Buffer.allocUnsafe(pixels * 3);
+  for (let source = 0, target = 0; target < rgb.length; source += 4, target += 3) {
+    const alpha = rgba[source + 3];
+    if (alpha === 255) {
+      rgb[target] = rgba[source];
+      rgb[target + 1] = rgba[source + 1];
+      rgb[target + 2] = rgba[source + 2];
+    } else {
+      rgb[target] = ((rgba[source] * alpha + 127) / 255) | 0;
+      rgb[target + 1] = ((rgba[source + 1] * alpha + 127) / 255) | 0;
+      rgb[target + 2] = ((rgba[source + 2] * alpha + 127) / 255) | 0;
+    }
+  }
+  return rgb;
 }

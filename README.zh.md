@@ -4,6 +4,7 @@
 
 ## 功能
 
+- 输入由 ffmpeg 按内容探测：视频容器（MP4/MKV/MOV/WebM/AVI 等）与 GIF/APNG 动图都可直接作为输入
 - 时间槽按帧的真实时间戳归属。槽内没有源帧时输出空帧，空帧占一个格子，其余帧的位置不变
 - 变化量取局部峰值，局部变化与全局变化同等计入
 - 自适应采样：画面变化多的片段多抽帧、变化少的片段少抽帧，帧率限定在上下限之间，每段连续覆盖时间轴
@@ -71,6 +72,18 @@
 时间码文字取 Roboto Mono 字形，经 `opentype.js` 转为 SVG 路径后合成到图片。
 渲染不使用 SVG `<text>`，不读取系统字体。
 
+## 输入格式
+
+输入由 ffmpeg 按文件内容探测，扩展名不参与判断；ffmpeg 能解码的容器与编码都可以作为输入（MP4、MKV、MOV、WebM、AVI 等）。另外直接支持动图输入：
+
+- GIF 与 APNG 按与视频相同的槽规则处理：帧按真实时间戳归槽，没有源帧的槽输出空帧，槽位不压实。
+- APNG 容器没有总时长字段，工具按帧表（pts + duration）推算时长，`manifest.json` 的 `source.durationSource` 记为 `packets`。
+- 动图的透明通道：输出 `png` / `webp` 时原样保留（画布为 RGBA，帧的透明区域在输出图中透明）；输出 `jpg` 时格式不支持 alpha，透明区域合成到黑色背景。
+- 只有一帧的静态图片（PNG/JPG/单帧 GIF）不是视频或动图，直接报错。
+- 动画 WebP 需要 ffmpeg 支持 `ANIM/ANMF`；当前 ffmpeg 构建不支持时会直接报错，可先转换为 GIF/APNG。
+- 动图帧率通常低于默认的每秒 20 槽，缺帧的槽会输出空帧（与低帧率视频一致）；预算模式的总帧数由 `--budget-fps` 决定，超过源能提供的帧数时会报错，需要调低预算。
+- `manifest.json` 的 `source` 段记录 `codec`、`formatName`、`animated`、`frameCount`、`durationSource`、`hasAlpha`，便于核对。
+
 ## 安装
 
 ```bash
@@ -98,7 +111,7 @@ node bin/cli.mjs input.mp4 -o out --budget --budget-fps 10 --max-fps 30
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
-| `-i, --input` |  | 输入视频 |
+| `-i, --input` |  | 输入视频或动图（GIF/APNG） |
 | `-o, --out` | `./frames` | 输出目录 |
 | `--start` | `0` | 截取起点，秒 |
 | `--end` | 片尾 | 截取终点，秒 |
@@ -111,7 +124,7 @@ node bin/cli.mjs input.mp4 -o out --budget --budget-fps 10 --max-fps 30
 | `--budget-decay` | `3.5` | 预算模式活动度衰减时间常数，秒，范围 0.1-60；越大掉帧越慢 |
 | `--adapt-low` | `1` | 活动度不高于该值时使用下限帧率 |
 | `--adapt-high` | `40` | 活动度不低于该值时使用上限帧率 |
-| `--format` | `jpg` | `jpg` / `png` / `webp`；`jpeg` 等价于 `jpg` |
+| `--format` | `jpg` | `jpg` / `png` / `webp`；`jpeg` 等价于 `jpg`。png 与 webp 保留动图透明通道，jpg 按黑色合成透明区域 |
 | `--quality` | `90` | 图片质量，1-100。png 为无损格式，此值映射为压缩级别 |
 | `--layout` | `2x2` | 排版，列 x 行 |
 | `--frames-per-sheet` | 排版格子数 | 每张图包含的帧数。超过格子数时报错 |
@@ -141,6 +154,8 @@ clip__t5.00s-5.40s__q90__2x2__00001.jpg
 ```
 
 `manifest.json` 含 `range`、`params`、`source`、`summary`、`sheets` 五段。`sheets` 每项对应一张图片，记录时间区间与逐格的槽号、时间戳、得分、候选帧数、选中依据。
+
+`params.preserveAlpha` 记录本次是否保留透明通道（输出 `png` / `webp` 且源含 alpha 时为 true）；`source` 段同时记录 `codec`、`formatName`、`animated`、`frameCount`、`durationSource`、`hasAlpha`，便于核对输入格式与动图信息。
 
 自适应与预算模式下文件名格式不变，但每张图的时间跨度随密度变化。自适应模式 `params.mode` 为 `adaptive`，记录 `minFps`、`maxFps`、`windowSeconds`、`adaptLow`、`adaptHigh`；预算模式 `params.mode` 为 `budget`，记录 `budgetFps`、`budgetFrames`、`minFps`、`maxFps`、`windowSeconds`、`activityDecaySeconds`、`allocator`。两种模式的每格都额外记录 `end`、`duration`、`window` 与 `windowFps`，`summary` 增加 `windows` 与 `avgFps`。
 

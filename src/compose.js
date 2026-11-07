@@ -132,11 +132,15 @@ function cellOverlays(cell, cellWidth, cellHeight, stamp, left, top) {
   const overlays = [];
 
   if (cell.buffer && !unused) {
+    // 源帧带 alpha（输出 PNG/WebP）时用 4 通道、source 混合模式整块替换：
+    // 默认的 over 会把透明像素与白色画布混合，等于把透明通道丢掉。
+    const channels = cell.channels === 4 ? 4 : 3;
     overlays.push({
       input: cell.buffer,
-      raw: { width: cellWidth, height: cellHeight, channels: 3 },
+      raw: { width: cellWidth, height: cellHeight, channels },
       left,
       top,
+      ...(channels === 4 ? { blend: 'source' } : {}),
     });
   } else {
     overlays.push({
@@ -161,10 +165,17 @@ function pngLevel(quality) {
   return Math.max(0, Math.min(9, Math.round((100 - quality) / 11)));
 }
 
+/**
+ * 合成一张拼图。
+ *
+ * outputAlpha=true 时画布为 RGBA，含 alpha 的帧按 source 模式整块写入，
+ * 透明区域会保留到 PNG/WebP 输出；JPG 不支持透明，调用方应传 false 并
+ * 在解码阶段完成黑底合成。
+ */
 export async function composeSheet({
   cells, cellWidth, cellHeight, layout, outFile,
   format, quality, annotate = true, gap = 4,
-  stampPos = 'tl', stampDir = 'h-lr',
+  stampPos = 'tl', stampDir = 'h-lr', outputAlpha = false,
 }) {
   const { cols, rows, cells: totalCells } = parseLayout(layout);
 
@@ -184,8 +195,14 @@ export async function composeSheet({
     overlays.push(...cellOverlays(cell, cellWidth, cellHeight, stamp, left, top));
   }
 
-  const image = sharp({ create: { width, height, channels: 3, background: '#FFFFFF' } })
-    .composite(overlays);
+  const image = sharp({
+    create: {
+      width,
+      height,
+      channels: outputAlpha ? 4 : 3,
+      background: outputAlpha ? { r: 255, g: 255, b: 255, alpha: 1 } : '#FFFFFF',
+    },
+  }).composite(overlays);
 
   if (format === 'png') await image.png({ compressionLevel: pngLevel(quality) }).toFile(outFile);
   else if (format === 'webp') await image.webp({ quality }).toFile(outFile);

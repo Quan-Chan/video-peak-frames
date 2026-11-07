@@ -3,6 +3,11 @@ import { parseLayout, capacityError } from './compose.js';
 /** 输出格式 -> 扩展名。jpeg 是 jpg 的别名。 */
 export const EXT = { jpg: 'jpg', jpeg: 'jpg', png: 'png', webp: 'webp' };
 
+/** 输出格式是否支持 alpha 通道（JPG 不支持）。 */
+export function outputSupportsAlpha(format) {
+  return format === 'png' || format === 'webp';
+}
+
 export function extensionOf(format) {
   return EXT[format] ?? 'jpg';
 }
